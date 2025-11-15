@@ -1,0 +1,248 @@
+name: M3U8转MP4下载转换
+
+on:
+  workflow_dispatch:
+    inputs:
+      m3u8_url:
+        description: '要下载和转换的M3U8链接'
+        required: true
+        type: string
+      release_tag:
+        description: '发布标签（例如：v1.0.0）'
+        required: true
+        type: string
+        default: 'v1.0.0'
+      output_filename:
+        description: '输出MP4文件名基础（不含扩展名）'
+        required: false
+        type: string
+        default: 'video'
+      thread_count:
+        description: '下载线程数'
+        required: false
+        type: number
+        default: 32
+      send_filename:
+        description: '发送MP4文件名'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write  # 授予写入内容的权限
+
+env:
+  OUTPUT_DIR: outputs
+
+jobs:
+  download-and-release:
+    name: 使用N_m3u8DL-RE下载并发布
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 检出代码库
+      uses: actions/checkout@v4
+
+    - name: 生成唯一标识符
+      run: |
+        export TZ='Asia/Shanghai'
+        TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+        RUN_HASH=${GITHUB_RUN_ID:0:8}
+        UNIQUE_ID="${TIMESTAMP}_${RUN_HASH}"
+        echo "UNIQUE_ID=$UNIQUE_ID" >> $GITHUB_ENV
+        echo "最终文件名: ${{ github.event.inputs.output_filename }}_$UNIQUE_ID.mp4"
+
+    - name: 安装基础依赖
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget tar bc python3
+
+    - name: 下载并安装N_m3u8DL-RE
+      run: |
+        # 下载N_m3u8DL-RE
+        wget https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.5.1-beta/N_m3u8DL-RE_v0.5.1-beta_linux-x64_20251029.tar.gz
+        
+        # 解压文件
+        tar -xzf N_m3u8DL-RE_v0.5.1-beta_linux-x64_20251029.tar.gz
+        
+        # 复制到/usr/local/bin并设置权限
+        sudo cp N_m3u8DL-RE /usr/local/bin/
+        sudo chmod +x /usr/local/bin/N_m3u8DL-RE
+        
+        # 验证安装
+        N_m3u8DL-RE --version
+
+    - name: 安装ffmpeg（用于合并）
+      run: |
+        sudo apt-get install -y ffmpeg
+
+    - name: 创建输出目录
+      run: |
+        mkdir -p $OUTPUT_DIR
+        mkdir -p temp
+
+    - name: 使用N_m3u8DL-RE下载m3u8
+      run: |
+        echo "开始使用N_m3u8DL-RE下载..."
+        echo "输入URL: ${{ github.event.inputs.m3u8_url }}"
+        echo "输出目录: $OUTPUT_DIR"
+        echo "线程数: ${{ github.event.inputs.thread_count }}"
+        
+        # 使用N_m3u8DL-RE下载
+        N_m3u8DL-RE "${{ github.event.inputs.m3u8_url }}" \
+          --save-dir "$OUTPUT_DIR" \
+          --save-name "${{ github.event.inputs.output_filename }}_$UNIQUE_ID" \
+          --thread-count ${{ github.event.inputs.thread_count }} \
+          --tmp-dir "temp" \
+          --download-retry-count 5 \
+          --http-request-timeout 120 \
+          --check-segments-count true \
+          --del-after-done true \
+          --write-meta-json true \
+          --log-level INFO
+
+        # 检查下载结果
+        if [ $? -eq 0 ]; then
+            echo "下载成功完成！"
+        else
+            echo "下载失败"
+            exit 1
+        fi
+
+    - name: 查找输出文件
+      id: find_output
+      run: |
+        # 查找可能的输出文件
+        OUTPUT_FILE=$(find "$OUTPUT_DIR" -name "*.mp4" -o -name "*.m4a" -o -name "*.mkv" | head -1)
+        
+        if [ -n "$OUTPUT_FILE" ]; then
+            echo "找到输出文件: $OUTPUT_FILE"
+            echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
+            
+            # 获取文件信息
+            FILE_SIZE=$(stat -c%s "$OUTPUT_FILE" 2>/dev/null || echo "0")
+            FILE_SIZE_MB=$(echo "scale=2; $FILE_SIZE / (1024*1024)" | bc)
+            echo "file_size_mb=$FILE_SIZE_MB" >> $GITHUB_OUTPUT
+            echo "file_name=$(basename $OUTPUT_FILE)" >> $GITHUB_OUTPUT
+        else
+            echo "未找到输出文件，列出目录内容:"
+            ls -la $OUTPUT_DIR/
+            exit 1
+        fi
+
+    - name: 列出所有文件
+      run: |
+        echo "=== 输出目录内容 ==="
+        ls -la $OUTPUT_DIR/
+        echo "=== 临时目录内容 ==="
+        ls -la temp/ 2>/dev/null || echo "临时目录不存在"
+        echo "=== 当前目录内容 ==="
+        ls -la
+
+    - name: 上传转换后的文件到Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: video-$UNIQUE_ID
+        path: |
+          $OUTPUT_DIR/
+          temp/
+        retention-days: 3
+    
+    - name: Get release description
+      id: get_release
+      env:
+        RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+      run: |
+        response=$(curl -s \
+          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG")
+        
+        # 提取 body 内容
+        description=$(echo "$response" | jq -r '.body')
+        
+        # 处理多行文本（替换换行符）
+        encoded_description=$(echo "$description" | jq -sRr @uri)
+        
+        # 设置输出变量
+        echo "description=$encoded_description" >> $GITHUB_OUTPUT
+
+    - name: Use the description
+      run: |
+        if [ -z "${{ steps.get_release.outputs.description }}" ]; then
+            echo "描述为空或null"
+        else
+            # 解码并显示描述内容
+            decoded_description=$(python -c "import urllib.parse; print(urllib.parse.unquote('${{ steps.get_release.outputs.description }}'))")
+            echo "$decoded_description" > release_body.md
+        fi
+        
+        
+        
+    
+    
+
+    - name: 生成发布说明
+      run: |
+        # 使用简单的echo命令避免heredoc语法问题
+        # echo "MP4信息" > release_body.md
+        if [ -n "${{ steps.get_release.outputs.description }}" ]; then
+            echo "" >> release_body.md
+            echo "---" >> release_body.md
+            echo "" >> release_body.md
+        fi
+        # echo "下载时间: $(date -Iseconds)" >> release_body.md
+        echo "文件名称: ${{ steps.find_output.outputs.file_name }}" >> release_body.md
+        echo "文件大小: ${{ steps.find_output.outputs.file_size_mb }}MB" >> release_body.md
+        # echo "运行ID: ${{ github.run_id }}" >> release_body.md
+        # echo "唯一标识: $UNIQUE_ID" >> release_body.md
+        echo "下载链接: [点击跳转](https://hk.gh-proxy.org/https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.release_tag }}/${{ steps.find_output.outputs.file_name }})" >> release_body.md
+
+    - name: 准备发布文件
+      run: |
+        # 确保文件存在
+        if [ -f "${{ steps.find_output.outputs.output_file }}" ]; then
+          echo "主文件存在: ${{ steps.find_output.outputs.output_file }}"
+          # 复制文件到工作目录根目录，避免路径问题
+          cp "${{ steps.find_output.outputs.output_file }}" "./${{ steps.find_output.outputs.file_name }}"
+        else
+          echo "错误：文件不存在: ${{ steps.find_output.outputs.output_file }}"
+          exit 1
+        fi
+        
+
+
+
+        
+        
+        
+    # - name: 检查release
+      # run: |
+        
+        
+        
+        
+    - name: 创建GitHub发布并上传文件
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ github.event.inputs.release_tag }}
+        name: 视频下载 - ${{ github.event.inputs.release_tag }}
+        body_path: release_body.md
+        files: ${{ steps.find_output.outputs.file_name }}
+        draft: false
+        prerelease: false
+        overwrite: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Send
+      run: |
+        curl -X POST -d '"${{ github.event.inputs.send_filename }}" => "https://hk.gh-proxy.org/https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.release_tag }}/${{ steps.find_output.outputs.file_name }}"' http://${{ secrets.SEND }}/submit/
+
+    - name: 清理临时文件
+      run: |
+        rm -rf $OUTPUT_DIR/*
+        rm -rf temp/
+        rm -f release_body.md
+        rm -f N_m3u8DL-RE_v0.5.1-beta_linux-x64_20251029.tar.gz
+        rm -f "./${{ steps.find_output.outputs.file_name }}"

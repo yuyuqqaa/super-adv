@@ -1,0 +1,432 @@
+name: 多个M3U8转MP4下载转换
+
+on:
+  workflow_dispatch:
+    inputs:
+      m3u8_list_url:
+        description: '包含多个M3U8链接的TXT文件链接（格式：send_filename => m3u8_url）'
+        required: true
+        type: string
+      release_tag:
+        description: '发布标签（例如：v1.0.0）'
+        required: true
+        type: string
+        default: 'v1.0.0'
+      output_filename:
+        description: '输出MP4文件名基础（不含扩展名）'
+        required: false
+        type: string
+        default: 'video'
+      thread_count:
+        description: '下载线程数'
+        required: false
+        type: number
+        default: 32
+
+permissions:
+  contents: write  # 授予写入内容的权限
+
+env:
+  OUTPUT_DIR: outputs
+  THREAD_COUNT: ${{ github.event.inputs.thread_count }}
+  SEND_URL: ${{ secrets.SEND }}
+
+jobs:
+  download-and-release:
+    name: 使用N_m3u8DL-RE下载并发布多个视频
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 检出代码库
+      uses: actions/checkout@v4
+
+    - name: 生成唯一标识符
+      run: |
+        export TZ='Asia/Shanghai'
+        TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+        RUN_HASH=${GITHUB_RUN_ID:0:8}
+        UNIQUE_ID="${TIMESTAMP}_${RUN_HASH}"
+        echo "UNIQUE_ID=$UNIQUE_ID" >> $GITHUB_ENV
+
+    - name: 安装基础依赖
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget tar bc python3 curl jq
+
+    - name: 下载并解析M3U8列表文件
+      id: download_list
+      run: |
+        echo "下载M3U8列表文件..."
+        curl -s -L -o m3u8_list.txt "${{ github.event.inputs.m3u8_list_url }}"
+        
+        # 检查文件是否下载成功
+        if [ ! -s m3u8_list.txt ]; then
+          echo "错误：无法下载M3U8列表文件或文件为空"
+          exit 1
+        fi
+        
+        echo "=== M3U8列表文件内容 ==="
+        cat m3u8_list.txt
+        echo "========================="
+        
+        # 使用Python解析文件，更可靠
+        python3 << 'EOF'
+        import re
+        import json
+        import os
+        
+        with open('m3u8_list.txt', 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        tasks = []
+        index = 0
+        for i, line in enumerate(lines):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            
+            # 匹配格式: "send_filename" => "m3u8url"
+            pattern = r'\"([^\"]+)\"\s*=>\s*\"([^\"]+)\"'
+            match = re.search(pattern, line)
+            
+            if match:
+                send_filename = match.group(1)
+                m3u8_url = match.group(2)
+                
+                print(f"任务{index}: {send_filename} => {m3u8_url}")
+                tasks.append({
+                    'send_filename': send_filename,
+                    'm3u8_url': m3u8_url
+                })
+                index += 1
+            else:
+                print(f"警告: 第{i+1}行格式不正确: {line}")
+        
+        # 将任务列表保存为JSON文件
+        with open('tasks.json', 'w', encoding='utf-8') as f:
+            json.dump(tasks, f, ensure_ascii=False, indent=2)
+        
+        # 设置总任务数
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f"total_tasks={index}\n")
+        
+        print(f"找到 {index} 个M3U8任务")
+        EOF
+
+    - name: 下载并安装N_m3u8DL-RE
+      run: |
+        # 下载N_m3u8DL-RE
+        wget https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.5.1-beta/N_m3u8DL-RE_v0.5.1-beta_linux-x64_20251029.tar.gz
+        
+        # 解压文件
+        tar -xzf N_m3u8DL-RE_v0.5.1-beta_linux-x64_20251029.tar.gz
+        
+        # 复制到/usr/local/bin并设置权限
+        sudo cp N_m3u8DL-RE /usr/local/bin/
+        sudo chmod +x /usr/local/bin/N_m3u8DL-RE
+        
+        # 验证安装
+        N_m3u8DL-RE --version
+
+    - name: 安装ffmpeg
+      run: |
+        sudo apt-get install -y ffmpeg
+
+    - name: 创建输出目录
+      run: |
+        mkdir -p $OUTPUT_DIR
+        mkdir -p temp
+
+    - name: 批量下载M3U8文件
+      id: batch_download
+      env:
+        RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+        OUTPUT_FILENAME: ${{ github.event.inputs.output_filename }}
+      run: |
+        # 从JSON文件读取任务列表
+        TASKS_FILE="tasks.json"
+        if [ ! -f "$TASKS_FILE" ]; then
+          echo "错误: 任务文件不存在"
+          exit 1
+        fi
+        
+        TOTAL_TASKS=${{ steps.download_list.outputs.total_tasks }}
+        echo "开始批量下载 $TOTAL_TASKS 个视频..."
+        
+        # 使用Python处理批量下载
+        python3 << 'EOF'
+        import json
+        import os
+        import subprocess
+        import shutil
+        import glob
+        
+        # 读取任务列表
+        with open('tasks.json', 'r', encoding='utf-8') as f:
+            tasks = json.load(f)
+        
+        total_tasks = len(tasks)
+        output_files = []
+        release_body_content = ""
+        
+        # 获取环境变量
+        unique_id = os.environ['UNIQUE_ID']
+        thread_count = os.environ.get('THREAD_COUNT', '32')
+        output_dir = os.environ['OUTPUT_DIR']
+        release_tag = os.environ.get('RELEASE_TAG', 'v1.0.0')
+        repository = os.environ['GITHUB_REPOSITORY']
+        output_filename = os.environ.get('OUTPUT_FILENAME', 'video')
+        
+        print(f"Release Tag: {release_tag}")
+        print(f"Repository: {repository}")
+        print(f"Output Filename Base: {output_filename}")
+        
+        for i, task in enumerate(tasks):
+            send_filename = task['send_filename']
+            m3u8_url = task['m3u8_url']
+            
+            print(f"=== 处理第 {i+1}/{total_tasks} 个任务 ===")
+            print(f"发送文件名: '{send_filename}'")
+            print(f"M3U8 URL: '{m3u8_url}'")
+            
+            # 检查变量是否为空
+            if not send_filename or not m3u8_url:
+                print("错误: send_filename 或 m3u8_url 为空")
+                exit(1)
+            
+            # 生成输出文件名：以output_filename为开头，加上序号和唯一标识符
+            clean_output_filename = ''.join(c for c in output_filename if c.isalnum() or c in '._-')
+            output_file_basename = f"{clean_output_filename}_{i+1:02d}_{unique_id}"
+            
+            # 使用N_m3u8DL-RE下载
+            print("开始下载...")
+            cmd = [
+                'N_m3u8DL-RE', m3u8_url,
+                '--save-dir', output_dir,
+                '--save-name', output_file_basename,
+                '--thread-count', thread_count,
+                '--tmp-dir', f'temp_{i}',
+                '--download-retry-count', '5',
+                '--http-request-timeout', '120',
+                '--check-segments-count', 'true',
+                '--del-after-done', 'true',
+                '--write-meta-json', 'false',
+                '--log-level', 'INFO'
+            ]
+            
+            result = subprocess.run(cmd)
+            
+            # 检查下载结果
+            if result.returncode == 0:
+                print("下载成功完成！")
+            else:
+                print("下载失败")
+                exit(1)
+            
+            # 查找输出文件
+            output_file = None
+            for ext in ['.mp4', '.m4a', '.mkv']:
+                pattern = os.path.join(output_dir, f"{output_file_basename}{ext}")
+                files = glob.glob(pattern)
+                if files:
+                    output_file = files[0]
+                    break
+            
+            if output_file and os.path.exists(output_file):
+                print(f"找到输出文件: {output_file}")
+                
+                # 获取文件信息
+                file_size = os.path.getsize(output_file)
+                file_size_mb = round(file_size / (1024 * 1024), 2)
+                file_basename = os.path.basename(output_file)
+                
+                # 为每个文件生成单独的信息块，用---分隔
+                if i > 0:
+                    release_body_content += "\n---\n\n"
+                
+                #release_body_content += f"## {send_filename}\n"
+                release_body_content += f"- 文件名称: {file_basename}\n"
+                release_body_content += f"- 文件大小: {file_size_mb}MB\n"
+                release_body_content += f"- 下载链接: [点击下载](https://hk.gh-proxy.org/https://github.com/{repository}/releases/download/{release_tag}/{file_basename})\n"
+                
+                # 保存文件信息
+                output_files.append({
+                    'output_file': output_file,
+                    'file_basename': file_basename,
+                    'file_size_mb': file_size_mb,
+                    'send_filename': send_filename
+                })
+                
+                # 清理临时目录
+                temp_dir = f"temp_{i}"
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+            else:
+                print("未找到输出文件")
+                exit(1)
+            
+            print(f"=== 第 {i+1} 个任务完成 ===\n")
+        
+        # 保存发布说明内容
+        with open('release_body_content.txt', 'w', encoding='utf-8') as f:
+            f.write(release_body_content)
+        
+        # 保存文件列表到JSON
+        with open('output_files.json', 'w', encoding='utf-8') as f:
+            json.dump(output_files, f, ensure_ascii=False, indent=2)
+        
+        # 设置总任务数输出
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f"total_files_processed={len(output_files)}\n")
+        EOF
+
+    - name: 获取现有发布说明
+      id: get_release
+      env:
+        RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+      run: |
+        response=$(curl -s \
+          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG" || echo "{}")
+        
+        # 检查是否找到release
+        not_found=$(echo "$response" | jq -r '.message' 2>/dev/null || echo "unknown")
+        if [ "$not_found" = "Not Found" ]; then
+          echo "未找到现有release，创建新release"
+          echo "existing_body=" >> $GITHUB_OUTPUT
+        else
+          # 提取 body 内容
+          description=$(echo "$response" | jq -r '.body // ""' 2>/dev/null || echo "")
+          
+          # 处理多行文本
+          if [ -n "$description" ] && [ "$description" != "null" ]; then
+            encoded_description=$(echo "$description" | jq -sRr @uri 2>/dev/null || echo "")
+            echo "existing_body=$encoded_description" >> $GITHUB_OUTPUT
+          else
+            echo "existing_body=" >> $GITHUB_OUTPUT
+          fi
+        fi
+
+    - name: 生成最终发布说明
+      env:
+        RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+      run: |
+        # 初始化发布说明文件
+        touch release_body.md
+        
+        # 如果有现有描述，先写入
+        existing_body="${{ steps.get_release.outputs.existing_body }}"
+        if [ -n "$existing_body" ] && [ "$existing_body" != "null" ]; then
+          decoded_description=$(python3 -c "import urllib.parse; print(urllib.parse.unquote('$existing_body'))")
+          echo "$decoded_description" > release_body.md
+          
+          # 添加分隔符
+          echo "" >> release_body.md
+          echo "---" >> release_body.md
+          echo "" >> release_body.md
+        fi
+        
+        # 添加批量下载信息标题
+        echo "# 批量视频下载结果" >> release_body.md
+        echo "" >> release_body.md
+        echo "**下载时间**: $(date -Iseconds)" >> release_body.md
+        echo "**总文件数**: ${{ steps.batch_download.outputs.total_files_processed }}" >> release_body.md
+        echo "**运行ID**: ${{ github.run_id }}" >> release_body.md
+        echo "**唯一标识**: $UNIQUE_ID" >> release_body.md
+        echo "" >> release_body.md
+        
+        # 添加各个文件的信息（已经包含---分隔符）
+        if [ -f release_body_content.txt ]; then
+          cat release_body_content.txt >> release_body.md
+        fi
+
+    - name: 准备发布文件
+      run: |
+        # 使用Python处理文件准备
+        python3 << 'EOF'
+        import json
+        import shutil
+        import os
+        
+        # 读取输出文件列表
+        with open('output_files.json', 'r', encoding='utf-8') as f:
+            output_files = json.load(f)
+        
+        print(f"准备 {len(output_files)} 个文件用于发布...")
+        
+        for i, file_info in enumerate(output_files):
+            output_file = file_info['output_file']
+            file_basename = file_info['file_basename']
+            
+            if os.path.exists(output_file):
+                print(f"复制文件 {i+1}: {file_basename}")
+                shutil.copy2(output_file, f"./{file_basename}")
+            else:
+                print(f"错误：文件不存在: {output_file}")
+                exit(1)
+        EOF
+
+    - name: 创建GitHub发布并上传多个文件
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ github.event.inputs.release_tag }}
+        name: 批量视频下载 - ${{ github.event.inputs.release_tag }}
+        body_path: release_body.md
+        files: |
+          *.mp4
+          *.m4a
+          *.mkv
+        draft: false
+        prerelease: false
+        overwrite: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: 发送下载通知（可选）
+      if: env.SEND_URL != ''
+      env:
+        RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+      run: |
+        # 使用Python发送通知
+        python3 << 'EOF'
+        import json
+        import os
+        import requests
+        
+        # 读取任务列表和输出文件
+        with open('tasks.json', 'r', encoding='utf-8') as f:
+            tasks = json.load(f)
+        
+        with open('output_files.json', 'r', encoding='utf-8') as f:
+            output_files = json.load(f)
+        
+        send_url = os.environ.get('SEND_URL')
+        if not send_url:
+            print("SEND_URL 未设置，跳过通知")
+            exit(0)
+        
+        repository = os.environ['GITHUB_REPOSITORY']
+        release_tag = os.environ.get('RELEASE_TAG', 'v1.0.0')
+        
+        for i, (task, file_info) in enumerate(zip(tasks, output_files)):
+            send_filename = task['send_filename']
+            file_basename = file_info['file_basename']
+            
+            download_url = f"https://hk.gh-proxy.org/https://github.com/{repository}/releases/download/{release_tag}/{file_basename}"
+            data = f"{send_filename} => {download_url}"
+            
+            try:
+                response = requests.post(f"http://{send_url}/submit/", data=data)
+                print(f"通知发送成功: {send_filename}")
+            except Exception as e:
+                print(f"通知发送失败: {e}")
+        EOF
+
+    - name: 清理临时文件
+      run: |
+        rm -rf $OUTPUT_DIR/*
+        rm -rf temp_*
+        rm -f release_body.md release_body_content.txt
+        rm -f m3u8_list.txt tasks.json output_files.json
+        rm -f N_m3u8DL-RE_v0.5.1-beta_linux-x64_20251029.tar.gz        rm -f ./*.mp4 ./*.m4a ./*.mkv
