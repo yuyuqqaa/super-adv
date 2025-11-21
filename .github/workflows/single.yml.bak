@@ -1,165 +1,49 @@
-name: Single
-
+name: Single Workflow
 on:
-  workflow_dispatch:  # 只能手动触发执行
+  workflow_dispatch:
 
 jobs:
-  Server:
+  long_running_job:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 设置6小时超时，避免运行过久
-    
+    timeout-minutes: 360 # 每个作业运行6小时（360分钟）
     steps:
-    # 步骤1: 检出代码仓库
-    - name: 检出仓库代码
-      uses: actions/checkout@v4
-
-    # 步骤2: 更新系统软件包列表
-    - name: 更新软件包列表
-      run: sudo apt-get update
-
-    # 步骤3: 安装必要的基础软件
-    - name: 安装基础软件包
-      run: |
-        sudo apt-get install -y \
-          wget \
-          screen \
-          net-tools \
-          curl \
-          unzip
-
-    # 步骤4: 安装环境
-    - name: 安装环境
-      run: |
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-          xfce4 \
-          xfce4-goodies \
-          firefox \
-          fonts-noto \
-          xterm
-
-    # 步骤5: 安装服务器
-    - name: 安装
-      run: |
-        sudo apt-get install -y \
-          tigervnc-standalone-server \
-          tigervnc-xorg-extension
-
-    # 步骤6: 设置密码
-    - name: 设置密码
-      run: |
-        mkdir -p ~/.vnc
-        echo "${{ secrets.PASS }}" | vncpasswd -f > ~/.vnc/passwd
-        chmod 600 ~/.vnc/passwd
-
-    # 步骤7: 创建启动脚本（指定5901端口）
-    - name: 配置启动脚本
-      run: |
-        cat > ~/.vnc/xstartup << 'EOF'
-        #!/bin/bash
-        export XKL_XMODMAP_DISABLE=1
-        export XDG_CURRENT_DESKTOP="XFCE"
-        export XDG_MENU_PREFIX="xfce-"
-        export XDG_CONFIG_DIRS="/etc/xdg/xdg-xfce:/etc/xdg"
+          
+      - name: 检出代码
+        uses: actions/checkout@v5
         
-        # 启动Xfce4桌面环境
-        startxfce4 &
-        
-        # 在桌面创建关闭脚本
-        cat > ~/桌面/关闭VNC服务.sh << 'SCRIPT'
-        #!/bin/bash
-        echo "正在停止VNC和EasyTier服务..."
-        pkill -f "keep_alive.sh"
-        vncserver -kill :1
-        echo "服务已停止，可以安全关闭窗口。"
-        SCRIPT
-        
-        chmod +x ~/关闭VNC服务.sh
-        
-        # 在桌面创建说明文件
-        cat > ~/服务说明.txt << 'INFO'
-        VNC服务信息：
-        - VNC端口：5901
-        - EasyTier已启动在后台
-        - 双击"关闭VNC服务.sh"可安全停止所有服务
-        
-        连接信息：
-        - 使用VNC客户端连接localhost:5901
-        - 密码：您在GitHub Secret中设置的密码
-        
-        注意：关闭此VNC会话将终止所有服务
-        INFO
-        
-        echo "桌面快捷方式已创建"
-        EOF
-        
-        chmod +x ~/.vnc/xstartup
+      - name: 输出frpc.ini
+        run: |
+          cd ~
+          echo "${{ secrets.INI}}" | base64 --decode > frpc.ini
 
-    # 步骤8: 下载并配置EasyTier
-    - name: 设置EasyTier
-      run: |
-        # 从secret解码EasyTier配置
-        echo "${{ secrets.EASYTIER }}" | base64 -d > /opt/easytier/config/default.conf
-        echo "EasyTier配置已保存"
+      - name: 执行长时间任务
+        run: |
+          #!/bin/bash
+          # 更新系统
+          sudo apt update
+          chmod +x cmd.sh
+          ./cmd.sh
+          sudo apt install openssh-server
+          sudo tee -a /etc/ssh/sshd_config > /dev/null <<EOF
+          Port 22
+          PasswordAuthentication yes
+          PermitRootLogin yes
+          EOF
+          sudo systemctl restart ssh
+          cd ~
 
-        # 下载EasyTier（这里以示例URL为例，请替换为实际下载链接）
-        wget -O /tmp/easytier.sh "https://raw.githubusercontent.com/EasyTier/EasyTier/main/script/install.sh" && sudo bash /tmp/easytier.sh install
-        # chmod +x easytier
-        
-        # 由于无法确定实际下载地址，这里创建一个模拟的easytier脚本
-        cat > easytier << 'EOF'
-        #!/bin/bash
-        echo "EasyTier启动 - 配置: /opt/easytier/config/default.conf"
-        systemctl start easytier@default
-        
-        EOF
-        chmod +x easytier
 
-    # 步骤9: 创建保活脚本
-    - name: 创建保活脚本
-      run: |
-        # 创建保活脚本
-        cat > keep_alive.sh << 'EOF'
-        #!/bin/bash
-        echo "保活脚本启动，PID: $$"
-        # 记录保活脚本的PID，便于桌面脚本关闭
-        echo $$ > /tmp/keep_alive.pid
-        
-        # 无限循环，保持容器运行
-        while true; do
-            echo "$(date): 服务运行中..." >> /tmp/service_status.log
-            sleep 60
-        done
-        EOF
-        chmod +x keep_alive.sh
+          echo "root:$USER_PASS" | sudo chpasswd
+          
+          wget https://github.com/masgzy/zy/raw/main/frpc
+          chmod +x frpc
+          # 启动 frpc 服务（第一次）
+          nohup ./frpc -c frpc.ini
 
-    # 步骤10: 启动所有服务
-    - name: 启动VNC和EasyTier服务
-      run: |
-        
-
-        # 启动VNC服务器在5901端口（:1对应5901）
-        vncserver :1 -geometry 1280x720 -depth 24
-        echo "✅ VNC服务器已启动在端口5901"
-
-        # 显示连接信息
-        echo "=========================================="
-        echo "🎉 服务启动完成！"
-        echo "📊 VNC连接信息："
-        echo "   - 地址：localhost:5901"
-        echo "   - 显示号：:1"
-        echo "🔧 EasyTier状态：运行中"
-        echo "💡 在桌面可找到关闭脚本和说明文件"
-        echo "=========================================="
-
-        # 显示screen会话列表
-        screen -list
-
-        # 显示网络连接状态
-        netstat -tlnp | grep 5901 || echo "VNC端口监听检查"
-
-    # 步骤11: 运行保活脚本（保持容器运行）
-    - name: 保持服务运行
-      run: |
-        echo "🔄 启动保活脚本，保持容器运行..."
-        # 运行保活脚本（这会阻塞直到超时或被终止）
-        ./keep_alive.sh
+          # 每隔1小时输出一条日志信息
+          for i in {1..6}; do
+            echo "作业 ${{ github.event.inputs.job-index }} 正在运行，第 $i 小时"
+            sleep 3600
+          done
+        env:
+          USER_PASS: ${{ secrets.USER_PASS }}
