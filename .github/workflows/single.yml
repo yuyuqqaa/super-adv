@@ -29,8 +29,8 @@ jobs:
           #!/bin/bash
           # 更新系统
           sudo apt update
-          chmod +x cmd.sh
-          ./cmd.sh
+          # chmod +x cmd.sh
+          # ./cmd.sh
           sudo apt install openssh-server
           sudo tee -a /etc/ssh/sshd_config > /dev/null <<EOF
           Port 22
