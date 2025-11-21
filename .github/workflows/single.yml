@@ -97,12 +97,15 @@ jobs:
     # 步骤8: 下载并配置EasyTier
     - name: 设置EasyTier
       run: |
+        
+        wget -O /tmp/easytier.sh "https://raw.githubusercontent.com/EasyTier/EasyTier/main/script/install.sh" && sudo bash /tmp/easytier.sh install
+        
         # 从secret解码EasyTier配置
         echo "${{ secrets.EASYTIER }}" | base64 -d > /opt/easytier/config/default.conf
         echo "EasyTier配置已保存"
 
         # 下载EasyTier（这里以示例URL为例，请替换为实际下载链接）
-        wget -O /tmp/easytier.sh "https://raw.githubusercontent.com/EasyTier/EasyTier/main/script/install.sh" && sudo bash /tmp/easytier.sh install
+        
         # chmod +x easytier
         
         # 由于无法确定实际下载地址，这里创建一个模拟的easytier脚本

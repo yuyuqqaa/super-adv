@@ -1,4 +1,4 @@
-name: 安装 Xfce4、TigerVNC 和 EasyTier
+name: Single
 
 on:
   workflow_dispatch:  # 只能手动触发执行
