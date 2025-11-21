@@ -4,7 +4,7 @@ on:
   workflow_dispatch:  # 只能手动触发执行
 
 jobs:
-  Server:
+  部署VNC和EasyTier:
     runs-on: ubuntu-latest
     timeout-minutes: 360  # 设置6小时超时，避免运行过久
     
