@@ -22,7 +22,7 @@ jobs:
         run: |
           cd ~
           echo "${{ secrets.EASYTIER}}" | base64 --decode > /opt/easytier/config/default.conf
-          systemctl start easytier@default
+          sudo systemctl start easytier@default
 
       - name: 执行长时间任务
         run: |
