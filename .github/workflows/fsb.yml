@@ -1,0 +1,80 @@
+name: 运行 fsb
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run-fsb:
+    name: 运行FSB
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出仓库代码
+        uses: actions/checkout@v6
+
+      - name: 获取最新版本号和下载地址
+        id: get-release
+        run: |
+          response=$(curl -sL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/EverythingSuckz/TG-FileStreamBot/releases/latest)
+
+          latest_tag=$(echo "$response" | jq -r '.tag_name')
+          if [ -z "$latest_tag" ]; then
+            echo "❌ 获取最新标签失败"
+            exit 1
+          fi
+
+          echo "✅ 最新版本标签: $latest_tag"
+
+          download_url=$(echo "$response" | jq -r \
+            ".assets[] | select(.name == \"TG-FileStreamBot-${latest_tag}-linux-amd64.tar.gz\") | .browser_download_url")
+
+          if [ -z "$download_url" ]; then
+            echo "❌ 未找到标签 $latest_tag 对应的 linux-amd64 资源"
+            exit 1
+          fi
+
+          echo "✅ 下载地址: $download_url"
+          echo "tag=$latest_tag" >> "$GITHUB_OUTPUT"
+          echo "download_url=$download_url" >> "$GITHUB_OUTPUT"
+
+      - name: 下载并解压最新版
+        run: |
+          tag=${{ steps.get-release.outputs.tag }}
+          url=${{ steps.get-release.outputs.download_url }}
+
+          echo "⬇️  正在下载 TG-FileStreamBot $tag"
+          curl -sL "$url" -o fsb.tar.gz
+
+          echo "📦 正在解压 fsb.tar.gz"
+          tar -xzf fsb.tar.gz
+
+          if [ ! -f fsb ]; then
+            echo "❌ 解压后未找到 fsb 可执行文件，当前目录内容："
+            ls -l
+            exit 1
+          fi
+
+          echo "✅ 解压完成，fsb 已就绪"
+
+      - name: 从 Base64 Secret 解码出 .env
+        env:
+          FSB_ENV_BASE64: ${{ secrets.FENV }}
+        run: |
+          echo "$FSB_ENV_BASE64" | base64 --decode > .env
+          if [ ! -s .env ]; then
+            echo "❌ 解码 .env 失败或文件为空"
+            exit 1
+          fi
+          echo "✅ .env 文件已生成"
+
+      - name: 赋予执行权限并运行
+        run: |
+          chmod +x ./fsb
+          echo "🚀 正在启动 TG-FileStreamBot..."
+          ./fsb
