@@ -112,4 +112,4 @@ jobs:
         run: |
           chmod +x ./fsb
           echo "🚀 正在启动 TG-FileStreamBot..."
-          ./fsb run
+          ./fsb run 2>&1 | sed -E 's/"username": *"[^"]*"/"username": "***"/g'
