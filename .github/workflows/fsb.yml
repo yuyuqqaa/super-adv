@@ -62,21 +62,21 @@ jobs:
 
           echo "✅ 解压完成，fsb 已就绪"
 
-      - name: 从 Base64 Secret 解码出 .env
+      - name: 从 Base64 Secret 解码出 fsb.env
         env:
           FSB_ENV_BASE64: ${{ secrets.FENV }}
         run: |
-          echo "$FSB_ENV_BASE64" | base64 --decode > .env
-          if [ ! -s .env ]; then
-            echo "❌ 解码 .env 失败或文件为空"
+          echo "$FSB_ENV_BASE64" | base64 --decode > fsb.env
+          if [ ! -s fsb.env ]; then
+            echo "❌ 解码 fsb.env 失败或文件为空"
             exit 1
           fi
-          echo "✅ .env 文件已生成"
+          echo "✅ fsb.env 文件已生成"
 
       - name: 安装 cloudflared
         uses: AnimMouse/setup-cloudflared@v2
 
-      - name: 启动隧道并替换 .env 中的 HOST
+      - name: 启动隧道并替换 fsb.env 中的 HOST
         run: |
           # 后台启动 cloudflared，并将日志输出到 cf.log
           nohup cloudflared tunnel --url http://localhost:8080 > cf.log 2>&1 &
@@ -104,9 +104,9 @@ jobs:
           
           echo "✅ 获取到的隧道地址: $TUNNEL_URL"
           
-          # 将 .env 中的 <HOST> 替换为获取到的公网地址
-          sed -i "s|<HOST>|${TUNNEL_URL}|g" .env
-          echo "✅ 已将 .env 中的 <HOST> 替换为 $TUNNEL_URL"
+          # 将 fsb.env 中的 <HOST> 替换为获取到的公网地址
+          sed -i "s|<HOST>|${TUNNEL_URL}|g" fsb.env
+          echo "✅ 已将 fsb.env 中的 <HOST> 替换为 $TUNNEL_URL"
 
       - name: 赋予执行权限并运行 fsb
         run: |
