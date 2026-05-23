@@ -73,8 +73,20 @@ jobs:
           fi
           echo "✅ .env 文件已生成"
 
-      - name: 赋予执行权限并运行
+      - name: 安装 cloudflared
+        uses: AnimMouse/setup-cloudflared@v2
+
+      - name: 启动 TryCloudflare 隧道
+        uses: AnimMouse/setup-cloudflared/tunnel@v2
+        with:
+          url: http://localhost:8080
+
+      - name: 赋予执行权限并运行 fsb
         run: |
           chmod +x ./fsb
           echo "🚀 正在启动 TG-FileStreamBot..."
-          ./fsb
+          ./fsb run
+
+      - name: 关闭并查看 cloudflared 日志
+        if: '! cancelled()'
+        uses: AnimMouse/setup-cloudflared/shutdown@v2
