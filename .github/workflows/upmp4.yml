@@ -47,6 +47,9 @@ jobs:
         echo "UNIQUE_ID=$UNIQUE_ID" >> $GITHUB_ENV
         echo "最终文件名: ${{ github.event.inputs.output_filename }}_$UNIQUE_ID.mp4"
 
+    - name: 屏蔽MP4直链避免日志泄露
+      run: echo "::add-mask::${{ github.event.inputs.mp4_url }}"
+
     - name: 创建输出目录
       run: mkdir -p $OUTPUT_DIR
 
