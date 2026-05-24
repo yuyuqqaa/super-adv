@@ -1,0 +1,145 @@
+name: MP4下载并发布
+
+on:
+  workflow_dispatch:
+    inputs:
+      mp4_url:
+        description: '要下载的MP4直链'
+        required: true
+        type: string
+      release_tag:
+        description: '发布标签（例如：v1.0.0）'
+        required: true
+        type: string
+        default: 'v1.0.0'
+      output_filename:
+        description: '输出MP4文件名基础（不含扩展名）'
+        required: false
+        type: string
+        default: 'video'
+      send_filename:
+        description: '发送MP4文件名'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  OUTPUT_DIR: outputs
+
+jobs:
+  download-and-release:
+    name: 使用wget下载MP4并发布
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 检出代码库
+      uses: actions/checkout@v4
+
+    - name: 生成唯一标识符
+      run: |
+        export TZ='Asia/Shanghai'
+        TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+        RUN_HASH=${GITHUB_RUN_ID:0:8}
+        UNIQUE_ID="${TIMESTAMP}_${RUN_HASH}"
+        echo "UNIQUE_ID=$UNIQUE_ID" >> $GITHUB_ENV
+        echo "最终文件名: ${{ github.event.inputs.output_filename }}_$UNIQUE_ID.mp4"
+
+    - name: 创建输出目录
+      run: mkdir -p $OUTPUT_DIR
+
+    - name: 使用wget下载MP4
+      run: |
+        FILENAME="${{ github.event.inputs.output_filename }}_$UNIQUE_ID.mp4"
+        echo "开始下载: ${{ github.event.inputs.mp4_url }}"
+        wget --retry-connrefused --tries=5 --timeout=120 \
+             -O "$OUTPUT_DIR/$FILENAME" \
+             "${{ github.event.inputs.mp4_url }}"
+        if [ $? -eq 0 ]; then
+            echo "下载成功"
+        else
+            echo "下载失败"
+            exit 1
+        fi
+
+    - name: 查找输出文件
+      id: find_output
+      run: |
+        OUTPUT_FILE=$(find "$OUTPUT_DIR" -name "*.mp4" | head -1)
+        if [ -n "$OUTPUT_FILE" ]; then
+            echo "找到输出文件: $OUTPUT_FILE"
+            echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
+            FILE_SIZE=$(stat -c%s "$OUTPUT_FILE")
+            FILE_SIZE_MB=$(echo "scale=2; $FILE_SIZE / (1024*1024)" | bc)
+            echo "file_size_mb=$FILE_SIZE_MB" >> $GITHUB_OUTPUT
+            echo "file_name=$(basename $OUTPUT_FILE)" >> $GITHUB_OUTPUT
+        else
+            echo "未找到输出文件"
+            ls -la $OUTPUT_DIR/
+            exit 1
+        fi
+
+    - name: 上传到Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: mp4-${{ env.UNIQUE_ID }}
+        path: ${{ steps.find_output.outputs.output_file }}
+        retention-days: 3
+
+    - name: 获取release描述
+      id: get_release
+      env:
+        RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+      run: |
+        response=$(curl -s \
+          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG")
+        description=$(echo "$response" | jq -r '.body')
+        encoded_description=$(echo "$description" | jq -sRr @uri)
+        echo "description=$encoded_description" >> $GITHUB_OUTPUT
+
+    - name: 生成发布说明
+      run: |
+        trimmed_var=$(echo "${{ steps.get_release.outputs.description }}" | tr -d '[:space:]')
+        if [ -n "$trimmed_var" ]; then
+            python -c "import urllib.parse; print(urllib.parse.unquote('${{ steps.get_release.outputs.description }}'))" > release_body.md
+            echo "" >> release_body.md
+            echo "---" >> release_body.md
+            echo "" >> release_body.md
+        else
+            touch release_body.md
+        fi
+        echo "文件名称: ${{ steps.find_output.outputs.file_name }}" >> release_body.md
+        echo "文件大小: ${{ steps.find_output.outputs.file_size_mb }}MB" >> release_body.md
+        echo "下载链接: [点击跳转](https://hk.gh-proxy.org/https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.release_tag }}/${{ steps.find_output.outputs.file_name }})" >> release_body.md
+
+    - name: 准备发布文件
+      run: |
+        cp "${{ steps.find_output.outputs.output_file }}" "./${{ steps.find_output.outputs.file_name }}"
+
+    - name: 创建GitHub发布并上传文件
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ github.event.inputs.release_tag }}
+        name: 视频下载 - ${{ github.event.inputs.release_tag }}
+        body_path: release_body.md
+        files: ${{ steps.find_output.outputs.file_name }}
+        draft: false
+        prerelease: false
+        overwrite: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: 发送通知
+      if: ${{ github.event.inputs.send_filename != '' }}
+      run: |
+        curl -X POST -d '"${{ github.event.inputs.send_filename }}" => "https://hk.gh-proxy.org/https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.release_tag }}/${{ steps.find_output.outputs.file_name }}"' http://${{ secrets.SEND }}/submit/
+
+    - name: 清理
+      run: |
+        rm -rf $OUTPUT_DIR
+        rm -f release_body.md
+        rm -f "./${{ steps.find_output.outputs.file_name }}"
