@@ -31,7 +31,7 @@ env:
 
 jobs:
   download-and-release:
-    name: 使用wget下载MP4并发布
+    name: 使用wget2下载MP4并发布
     runs-on: ubuntu-latest
     
     steps:
@@ -50,16 +50,24 @@ jobs:
     - name: 屏蔽MP4直链避免日志泄露
       run: echo "::add-mask::${{ github.event.inputs.mp4_url }}"
 
+    - name: 安装 wget2
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget2
+
     - name: 创建输出目录
       run: mkdir -p $OUTPUT_DIR
 
-    - name: 使用wget下载MP4
+    - name: 使用wget2下载MP4
       run: |
         FILENAME="${{ github.event.inputs.output_filename }}_$UNIQUE_ID.mp4"
         echo "开始下载: ${{ github.event.inputs.mp4_url }}"
-        wget --retry-connrefused --tries=5 --timeout=120 \
-             -O "$OUTPUT_DIR/$FILENAME" \
-             "${{ github.event.inputs.mp4_url }}"
+        wget2 --max-threads=32 \
+              --tries=5 \
+              --timeout=120 \
+              --progress=dot \
+              --output-document="$OUTPUT_DIR/$FILENAME" \
+              "${{ github.event.inputs.mp4_url }}"
         if [ $? -eq 0 ]; then
             echo "下载成功"
         else
