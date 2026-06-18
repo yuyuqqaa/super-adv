@@ -7,8 +7,6 @@ on:
         description: '运行时长（小时）'
         required: true
         default: '6'
-  schedule:
-    - cron: '0 */6 * * *'  # 每6小时自动运行一次
 
 env:
   VMPT_PORT: '8080'  # 固定端口
