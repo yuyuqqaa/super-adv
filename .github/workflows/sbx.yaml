@@ -71,12 +71,22 @@ jobs:
             exit 1
           fi
           
+          # # 调试：显示脚本输出内容（用于排查问题）
+          # echo "📋 argosbx脚本输出内容:"
+          # cat argosbx_output.log
+          
           # 提取所有vmess://链接
           echo "🔍 提取所有vmess://链接..."
           VMESS_LINKS=$(grep -oP 'vmess://[^\s"]+' argosbx_output.log)
           
-          # 将链接转换为数组
-          IFS=$'\n' read -d '' -ra VMESS_ARRAY <<< "$VMESS_LINKS"
+          if [ -z "$VMESS_LINKS" ]; then
+            echo "::error::未找到任何vmess链接"
+            cat argosbx_output.log
+            exit 1
+          fi
+          
+          # 将链接转换为数组（使用更安全的方法）
+          mapfile -t VMESS_ARRAY <<< "$VMESS_LINKS"
           VMESS_COUNT=${#VMESS_ARRAY[@]}
           
           echo "✅ 找到 $VMESS_COUNT 个vmess链接"
@@ -97,11 +107,19 @@ jobs:
             if [ $? -eq 0 ]; then
               echo "✅ Base64解码成功"
               
+              # # 调试：显示解码后的JSON
+              # echo "📋 解码后的JSON内容:"
+              # echo "$JSON_STR"
+              
               # 解析JSON并修改服务器地址
               MODIFIED_JSON=$(echo "$JSON_STR" | jq -r --arg new_add "cf.877774.xyz" '.add = $new_add')
               
               if [ $? -eq 0 ]; then
                 echo "✅ JSON解析成功，服务器IP已修改"
+                
+                # 调试：显示修改后的JSON
+                echo "📋 修改后的JSON内容:"
+                echo "$MODIFIED_JSON"
                 
                 # 重新编码为Base64
                 NEW_BASE64_STR=$(echo "$MODIFIED_JSON" | base64 -w 0 2>/dev/null)
@@ -139,6 +157,9 @@ jobs:
             exit 1
           fi
           
+          # 调试：显示最终链接（不显示完整内容）
+          echo "📋 最终代理链接类型: $(echo "$PROXY_LINK" | grep -oP '^\w+://')"
+          
           # 将代理链接保存到GITHUB_ENV（不会显示在日志中）
           echo "PROXY_LINK=$PROXY_LINK" >> $GITHUB_ENV
           
@@ -160,8 +181,9 @@ jobs:
           
           # 遮蔽完整URL，避免在日志中显示
           echo "::add-mask::$FULL_URL"
+         
           
-          # 发送GET请求到DURL
+          # 发送请求到DURL
           echo "Sending to DURL..."
           RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" "$FULL_URL")
           
