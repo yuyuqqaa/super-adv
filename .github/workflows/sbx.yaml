@@ -15,7 +15,7 @@ env:
   ARGO_PROTOCOL: 'vwpt' 
 
 jobs:
-  run-proxy-and-notify:
+  run-argo:
     runs-on: ubuntu-latest
     timeout-minutes: 360  # 6小时超时（360分钟）
     
@@ -61,14 +61,14 @@ jobs:
           chmod +x argosbx.sh
 
       - name: Run ArgoSBX script and capture proxy link
-        id: run-proxy
+        id: run-argo
         env:
           VWPT: ${{ env.VWPT_PORT }}
           UUID: ${{ env.UUID }}
           ARGO: ${{ env.ARGO_PROTOCOL }}
         run: |
           # 运行argosbx脚本并将输出重定向到文件（避免日志中显示）
-          ./argosbx.sh > argosbx_output.log 2>&1
+          vwpt="${{ env.VWPT_PORT }}" uuid="${{ env.UUID }}" argo="${{ env.ARGO_PROTOCOL }}" ./argosbx.sh > argosbx_output.log 2>&1
           
           # 检查脚本是否成功运行
           if [ $? -ne 0 ]; then
