@@ -33,7 +33,7 @@ jobs:
   download-and-release:
     name: 使用wget2下载MP4并发布
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: 检出代码库
       uses: actions/checkout@v4
@@ -45,7 +45,8 @@ jobs:
         RUN_HASH=${GITHUB_RUN_ID:0:8}
         UNIQUE_ID="${TIMESTAMP}_${RUN_HASH}"
         echo "UNIQUE_ID=$UNIQUE_ID" >> $GITHUB_ENV
-        echo "最终文件名: ${{ github.event.inputs.output_filename }}_$UNIQUE_ID.mp4"
+        # 这里只打印，后面真正用 UNIQUE_ID 拼接文件名
+        echo "最终文件名: ${{ github.event.inputs.output_filename }}_${UNIQUE_ID}.mp4"
 
     - name: 屏蔽MP4直链避免日志泄露
       run: echo "::add-mask::${{ github.event.inputs.mp4_url }}"
@@ -58,14 +59,15 @@ jobs:
     - name: 创建输出目录
       run: mkdir -p $OUTPUT_DIR
 
-    - name: 使用wget2下载MP4
+    - name: 使用wget2下载MP4（带进度条）
       run: |
         FILENAME="${{ github.event.inputs.output_filename }}_$UNIQUE_ID.mp4"
         echo "开始下载: ${{ github.event.inputs.mp4_url }}"
+        # 关键：--progress=bar:force 在非TTY（Actions日志）里也强制显示进度条
         wget2 --max-threads=32 \
               --tries=5 \
               --timeout=120 \
-              --progress=dot \
+              --progress=bar:force \
               --output-document="$OUTPUT_DIR/$FILENAME" \
               "${{ github.event.inputs.mp4_url }}"
         if [ $? -eq 0 ]; then
@@ -85,7 +87,7 @@ jobs:
             FILE_SIZE=$(stat -c%s "$OUTPUT_FILE")
             FILE_SIZE_MB=$(echo "scale=2; $FILE_SIZE / (1024*1024)" | bc)
             echo "file_size_mb=$FILE_SIZE_MB" >> $GITHUB_OUTPUT
-            echo "file_name=$(basename $OUTPUT_FILE)" >> $GITHUB_OUTPUT
+            echo "file_name=$(basename "$OUTPUT_FILE")" >> $GITHUB_OUTPUT
         else
             echo "未找到输出文件"
             ls -la $OUTPUT_DIR/
@@ -116,7 +118,7 @@ jobs:
       run: |
         trimmed_var=$(echo "${{ steps.get_release.outputs.description }}" | tr -d '[:space:]')
         if [ -n "$trimmed_var" ]; then
-            python -c "import urllib.parse; print(urllib.parse.unquote('${{ steps.get_release.outputs.description }}'))" > release_body.md
+            python3 -c "import urllib.parse; print(urllib.parse.unquote('${{ steps.get_release.outputs.description }}'))" > release_body.md
             echo "" >> release_body.md
             echo "---" >> release_body.md
             echo "" >> release_body.md
@@ -131,18 +133,26 @@ jobs:
       run: |
         cp "${{ steps.find_output.outputs.output_file }}" "./${{ steps.find_output.outputs.file_name }}"
 
-    - name: 创建GitHub发布并上传文件
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: ${{ github.event.inputs.release_tag }}
-        name: 视频下载 - ${{ github.event.inputs.release_tag }}
-        body_path: release_body.md
-        files: ${{ steps.find_output.outputs.file_name }}
-        draft: false
-        prerelease: false
-        overwrite: true
+    # ---- 关键修改：用 gh release upload 替代 action，以看到上传进度 ----
+    - name: 创建Release并上传文件（带进度）
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # 创建或更新Release
+        gh release create ${{ github.event.inputs.release_tag }} \
+          --repo ${{ github.repository }} \
+          --title "视频下载 - ${{ github.event.inputs.release_tag }}" \
+          --notes-file release_body.md \
+          || gh release edit ${{ github.event.inputs.release_tag }} \
+               --repo ${{ github.repository }} \
+               --title "视频下载 - ${{ github.event.inputs.release_tag }}" \
+               --notes-file release_body.md
+
+        # 上传资产，gh 会自带进度条输出到日志
+        gh release upload ${{ github.event.inputs.release_tag }} \
+          "./${{ steps.find_output.outputs.file_name }}" \
+          --repo ${{ github.repository }} \
+          --clobber
 
     - name: 发送通知
       if: ${{ github.event.inputs.send_filename != '' }}
@@ -150,6 +160,7 @@ jobs:
         curl -X POST -d '"${{ github.event.inputs.send_filename }}" => "https://hk.gh-proxy.org/https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.release_tag }}/${{ steps.find_output.outputs.file_name }}"' http://${{ secrets.SEND }}/submit/
 
     - name: 清理
+      if: always()
       run: |
         rm -rf $OUTPUT_DIR
         rm -f release_body.md
