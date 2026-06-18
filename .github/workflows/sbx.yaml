@@ -60,12 +60,8 @@ jobs:
           curl -Ls https://raw.githubusercontent.com/yonggekkk/argosbx/main/argosbx.sh -o argosbx.sh
           chmod +x argosbx.sh
 
-      - name: Run ArgoSBX script and capture proxy link
+      - name: Run ArgoSBX script and capture vmess links
         id: run-argo
-        env:
-          VMPT: ${{ env.VMPT_PORT }}
-          UUID: ${{ env.UUID }}
-          ARGO: ${{ env.ARGO_PROTOCOL }}
         run: |
           # 运行argosbx脚本并将输出重定向到文件（避免日志中显示）
           vmpt="${{ env.VMPT_PORT }}" uuid="${{ env.UUID }}" argo="${{ env.ARGO_PROTOCOL }}" ./argosbx.sh > argosbx_output.log 2>&1
@@ -77,21 +73,65 @@ jobs:
             exit 1
           fi
           
-          # 使用更精确的正则表达式提取vless://链接
-          # VLESS URI格式: vless://UUID@host:port?params#tag
-          PROXY_LINK=$(grep -oP 'vless://[a-zA-Z0-9-]+@[^\s"]+:[0-9]+[^\s"]*' argosbx_output.log | head -n 1)
+          # 提取所有vmess://链接
+          echo "🔍 提取所有vmess://链接..."
+          VMESS_LINKS=$(grep -oP 'vmess://[^\s"]+' argosbx_output.log)
           
-          # 如果没有找到vless链接，尝试其他协议作为备选
-          if [ -z "$PROXY_LINK" ]; then
-            echo "⚠️ 未找到vless://链接，尝试其他协议..."
-            # 尝试vmess://格式
-            PROXY_LINK=$(grep -oP 'vmess://[^\s"]+' argosbx_output.log | head -n 1)
-          fi
+          # 将链接转换为数组
+          IFS=$'\n' read -d '' -ra VMESS_ARRAY <<< "$VMESS_LINKS"
+          VMESS_COUNT=${#VMESS_ARRAY[@]}
           
-          # 如果仍没有找到，尝试从特定行模式提取
-          if [ -z "$PROXY_LINK" ]; then
-            echo "⚠️ 尝试从行模式提取..."
-            PROXY_LINK=$(grep -oP '(?:代理链接|Proxy Link)[:\s]*\K(vless|vmess)://[^\s"]+' argosbx_output.log | head -n 1)
+          echo "✅ 找到 $VMESS_COUNT 个vmess链接"
+          
+          # 初始化变量
+          PROXY_LINK=""
+          MODIFIED_LINK=""
+          
+          # 处理第二个vmess链接（如果有）
+          if [ $VMESS_COUNT -ge 2 ]; then
+            echo "🎯 处理第二个vmess链接..."
+            SECOND_LINK="${VMESS_ARRAY[1]}"
+            
+            # 解码Base64获取JSON
+            BASE64_STR="${SECOND_LINK#vmess://}"
+            JSON_STR=$(echo "$BASE64_STR" | base64 -d 2>/dev/null)
+            
+            if [ $? -eq 0 ]; then
+              echo "✅ Base64解码成功"
+              
+              # 解析JSON并修改服务器地址
+              MODIFIED_JSON=$(echo "$JSON_STR" | jq -r --arg new_add "cf.877774.xyz" '.add = $new_add')
+              
+              if [ $? -eq 0 ]; then
+                echo "✅ JSON解析成功，服务器IP已修改"
+                
+                # 重新编码为Base64
+                NEW_BASE64_STR=$(echo "$MODIFIED_JSON" | base64 -w 0 2>/dev/null)
+                
+                if [ $? -eq 0 ]; then
+                  MODIFIED_LINK="vmess://$NEW_BASE64_STR"
+                  echo "✅ 链接修改完成"
+                else
+                  echo "⚠️ Base64编码失败，使用原始链接"
+                  MODIFIED_LINK="$SECOND_LINK"
+                fi
+              else
+                echo "⚠️ JSON解析失败，使用原始链接"
+                MODIFIED_LINK="$SECOND_LINK"
+              fi
+            else
+              echo "⚠️ Base64解码失败，使用原始链接"
+              MODIFIED_LINK="$SECOND_LINK"
+            fi
+            
+            PROXY_LINK="$MODIFIED_LINK"
+          elif [ $VMESS_COUNT -ge 1 ]; then
+            echo "⚠️ 只找到一个vmess链接，使用该链接"
+            PROXY_LINK="${VMESS_ARRAY[0]}"
+          else
+            echo "::error::未找到任何vmess链接"
+            cat argosbx_output.log
+            exit 1
           fi
           
           # 验证是否获取到代理链接
