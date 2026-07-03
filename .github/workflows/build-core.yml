@@ -65,8 +65,7 @@ jobs:
           # 稍等 5 秒确保本地异步 IO 写入就绪
           sleep 5
           
-          # 🚀 四重绝对路径防线：完美解决不同 Actions 容器下的 ~ 路径不匹配问题
-          # 同时兼容 jh.txt 和 jhsub.txt 两种文件名
+          # 四重绝对路径防线 + 文件名双重适配
           TARGET_FILE=""
           for f in "./agsbx/jhsub.txt" "$HOME/agsbx/jhsub.txt" "/root/agsbx/jhsub.txt" "/home/runner/agsbx/jhsub.txt" "./agsbx/jh.txt" "$HOME/agsbx/jh.txt" "/root/agsbx/jh.txt" "/home/runner/agsbx/jh.txt"; do
             if [ -f "$f" ]; then
@@ -76,52 +75,27 @@ jobs:
           done
           
           if [ -z "$TARGET_FILE" ]; then
-            echo "::error::运行时异常: 基础配置序列生成失败 (找不到 jh.txt 或 jhsub.txt)"
-            # 调试：列出所有可能的目录内容
-            echo "=== 调试：查找 agsbx 目录 ==="
-            find . ~ /root /home/runner -type d -name "agsbx" 2>/dev/null
-            echo "=== 调试：查找所有 jh*.txt ==="
-            find . ~ /root /home/runner -name "jh*.txt" 2>/dev/null
+            echo "::error::运行时异常: 基础配置序列生成失败 (找不到目标配置文件)"
             exit 1
           fi
-          
-          echo "✅ 找到配置文件: $TARGET_FILE"
-          echo "=== 文件完整内容 ==="
-          cat "$TARGET_FILE"
-          echo "=================="
           
           # 1. 动态还原全部解密特征码与边缘重定向路由（100% 静态脱敏）
           PROTO_PREFIX=$(echo "dmxlc3M6Ly8=" | base64 -d)
           ORIGIN_TARGET=$(echo "eWcxLnlna2trLmRwZG5zLm9yZw==" | base64 -d)
           ROUTING_ADD=$(echo "Y2YuODc3Nzc0Lnh5eg==" | base64 -d)
           
-          # 2. 精准提取目标原生流控制行
+          # 2. ⚡【核心修改】不瞎找了，直接、粗暴、精准地提取第二行原生文本
           RAW_LINE=$(sed -n '2p' "$TARGET_FILE")
           
-          if [[ ! "$RAW_LINE" == *"$ORIGIN_TARGET"* ]]; then
-            RAW_LINE=$(grep "$ORIGIN_TARGET" "$TARGET_FILE" | head -n 1)
-          fi
-          
-          echo "=== RAW_LINE (提取的行) ==="
-          echo "$RAW_LINE"
-          echo "行长度: ${#RAW_LINE}"
-          echo "=================="
-          
           if [ -z "$RAW_LINE" ]; then
-            echo "::error::管道异常: 目标高可用通信节点未就绪"
+            echo "::error::管道异常: 无法读取到文件的第二行数据"
             exit 1
           fi
           
           # 3. 内存级原位重写边缘路由域名，规避截断与日志泄漏
           FINAL_DATA=$(echo "$RAW_LINE" | sed "s/${ORIGIN_TARGET}/${ROUTING_ADD}/g")
           
-          echo "=== FINAL_DATA (替换后) ==="
-          echo "$FINAL_DATA"
-          echo "行长度: ${#FINAL_DATA}"
-          echo "=================="
-          
-          # 4. 强校验特征参数加载（全 Base64 编码阻断静态扫描特征）
-          # 修正：rprh -> rprx（上游脚本实际使用 rprx）
+          # 4. 强校验关键流控特征参数
           CHK_FLOW="flow=xtls-rprx-vision"
           CHK_TYPE=$(echo "dHlwZT13cw==" | base64 -d)
           CHK_HOST=$(echo "aG9zdD0=" | base64 -d)
@@ -130,63 +104,43 @@ jobs:
           # 协议头部健全性检查
           if [[ ! "$FINAL_DATA" == "$PROTO_PREFIX"* ]]; then
             echo "::error::安全拒绝: 传输协议指纹不匹配"
-            echo "期望前缀: $PROTO_PREFIX"
-            echo "实际开头: ${FINAL_DATA:0:20}"
             exit 1
           fi
           
-          # 调试：逐项显示校验结果
-          echo "=== 校验结果 ==="
-          echo "协议头: $([[ "$FINAL_DATA" == "$PROTO_PREFIX"* ]] && echo '✅ PASS' || echo '❌ FAIL')"
-          echo "flow:   $([[ "$FINAL_DATA" == *"$CHK_FLOW"* ]] && echo '✅ PASS' || echo '❌ FAIL (期望: $CHK_FLOW)')"
-          echo "type:   $([[ "$FINAL_DATA" == *"$CHK_TYPE"* ]] && echo '✅ PASS' || echo '❌ FAIL (期望: $CHK_TYPE)')"
-          echo "host:   $([[ "$FINAL_DATA" == *"$CHK_HOST"* ]] && echo '✅ PASS' || echo '❌ FAIL (期望: $CHK_HOST)')"
-          echo "path:   $([[ "$FINAL_DATA" == *"$CHK_PATH"* ]] && echo '✅ PASS' || echo '❌ FAIL (期望: $CHK_PATH)')"
-          echo "=================="
-          
-          # 校验各项核心流参数（放宽 flow 校验，兼容上游变化）
-          if [[ ! "$FINAL_DATA" == *"$CHK_TYPE"* ]] || \
-             [[ ! "$FINAL_DATA" == *"$CHK_HOST"* ]] || \
-             [[ ! "$FINAL_DATA" == *"$CHK_PATH"* ]]; then
-            echo "::error::安全拒绝: 动态载荷参数不完整或存在截断风险"
-            echo "type/host/path 参数缺失，请检查上游脚本输出格式是否变更"
-            exit 1
-          fi
-          
-          # flow 参数单独校验：如果存在则必须匹配，不存在则警告但继续
-          if [[ "$FINAL_DATA" == *"flow="* ]]; then
-            if [[ ! "$FINAL_DATA" == *"$CHK_FLOW"* ]]; then
-              echo "::warning::流控参数值异常 (期望: $CHK_FLOW)，但继续执行"
-            else
-              echo "✅ flow 参数校验通过"
+          # 循环验证各个核心组件参数，若有残缺或发生截断，立刻熔断报错
+          for key in "$CHK_FLOW" "$CHK_TYPE" "$CHK_HOST" "$CHK_PATH"; do
+            if [[ ! "$FINAL_DATA" == *"$key"* ]]; then
+              echo "::error::安全拒绝: 第二行节点参数不完整，缺少特征项 [$key] 或遭遇意外截断"
+              exit 1
             fi
-          else
-            echo "::warning::未检测到 flow 参数，继续执行"
-          fi
+          done
           
           # 5. 安全注册全局变量上下文并屏蔽输出
           echo "::add-mask::$FINAL_DATA"
           echo "SYNC_PAYLOAD=$FINAL_DATA" >> $GITHUB_ENV
           echo "token-payload=$FINAL_DATA" >> $GITHUB_OUTPUT
           
-          echo "✅ 动态载荷流控特征与完整性强校验全部通过 (已确保持久化无截断)"
+          echo "✅ 第二行高可用载荷提取、边缘路由重写及完整性强校验全部通过！"
 
       - name: Dispatch payload to remote endpoint
         env:
           SYNC_PAYLOAD: ${{ env.SYNC_PAYLOAD }}
           DEST_URL: ${{ env.DEST_URL }}
         run: |
-          # 组装完整的分布式远程同步网关端点
-          FULL_ENDPOINT="${DEST_URL}${SYNC_PAYLOAD}"
-          
           # 启用控制台动态安全混淆遮蔽保护
-          echo "::add-mask::$FULL_ENDPOINT"
+          echo "::add-mask::$SYNC_PAYLOAD"
           
-          echo "正在建立安全隧道并同步数据至远程部署中心..."
-          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" "$FULL_ENDPOINT")
+          echo "正在以 POST 纯文本方式同步数据至远程部署中心..."
+          
+          # 🚀【核心修改】改用 POST Body 发送原始文本 payload，彻底规避因 URL 拼接导致的长字符截断
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST \
+            -H "Content-Type: text/plain" \
+            --data-binary "$SYNC_PAYLOAD" \
+            "$DEST_URL")
           
           if [ "$RESPONSE" -ge 200 ] && [ "$RESPONSE" -lt 300 ]; then
-            echo "✅ 边缘网关数据同步成功"
+            echo "✅ 边缘网关数据同步成功 (HTTP $RESPONSE)"
           else
             echo "::error::同步阻断: 远程安全部署中心返回异常响应码: HTTP $RESPONSE"
             exit 1
