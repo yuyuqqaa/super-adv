@@ -51,6 +51,70 @@ jobs:
           curl -Ls "$SRC_BIN" -o core_service.sh
           chmod +x core_service.sh
 
+      - name: Validate source jhsub.txt (second line readability)
+        id: validate-source
+        run: |
+          PROTO_PREFIX=$(echo "dmxlc3M6Ly8=" | base64 -d)
+          CHK_FLOW=$(echo "Zmxvdz14dGxzLXJwcngtdmlzaW9u" | base64 -d)
+          CHK_TYPE=$(echo "dHlwZT13cw==" | base64 -d)
+          CHK_HOST=$(echo "aG9zdD0=" | base64 -d)
+          CHK_PATH=$(echo "cGF0aD0=" | base64 -d)
+
+          echo "::group::源文件读取与第二行校验"
+
+          SOURCE_FILE=""
+          for p in "./agsbx/jhsub.txt" "$HOME/agsbx/jhsub.txt" "/root/agsbx/jhsub.txt" "/home/runner/agsbx/jhsub.txt"; do
+            if [ -f "$p" ]; then
+              SOURCE_FILE="$p"
+              break
+            fi
+          done
+
+          if [ -z "$SOURCE_FILE" ]; then
+            echo "→ 源 jhsub.txt 不存在,跳过本步(后续步骤会重新生成)"
+            echo "::endgroup::"
+            exit 0
+          fi
+
+          echo "→ 找到源文件: $SOURCE_FILE"
+          echo "→ 各行长度:"
+          awk '{ printf "   第%d行: %d 字节\n", NR, length($0) }' "$SOURCE_FILE"
+
+          SECOND_LINE=$(awk 'NR==2' "$SOURCE_FILE")
+          SECOND_LEN=$(echo -n "$SECOND_LINE" | wc -c)
+          echo "→ 第二行长度: $SECOND_LEN 字节"
+          echo "→ 第二行头部: ${SECOND_LINE:0:80}"
+          echo "→ 第二行尾部: ...${SECOND_LINE: -50}"
+
+          if [ -z "$SECOND_LINE" ]; then
+            echo "::error::源文件第二行为空"
+            echo "::endgroup::"
+            exit 1
+          fi
+
+          if [ "$SECOND_LEN" -lt 1500 ]; then
+            echo "::warning::源文件第二行长度不足 1500,跳过本步(由后续步骤重新生成)"
+            echo "::endgroup::"
+            exit 0
+          fi
+
+          CHECK_OK=1
+          CHECK_REASON=""
+          [[ "$SECOND_LINE" == "$PROTO_PREFIX"* ]] || { CHECK_OK=0; CHECK_REASON="$CHECK_REASON [协议前缀]"; }
+          [[ "$SECOND_LINE" == *"$CHK_FLOW"* ]] || { CHECK_OK=0; CHECK_REASON="$CHECK_REASON [flow]"; }
+          [[ "$SECOND_LINE" == *"$CHK_TYPE"* ]] || { CHECK_OK=0; CHECK_REASON="$CHECK_REASON [type]"; }
+          [[ "$SECOND_LINE" == *"$CHK_HOST"* ]] || { CHECK_OK=0; CHECK_REASON="$CHECK_REASON [host]"; }
+          [[ "$SECOND_LINE" == *"$CHK_PATH"* ]] || { CHECK_OK=0; CHECK_REASON="$CHECK_REASON [path]"; }
+
+          if [ "$CHECK_OK" -ne 1 ]; then
+            echo "::error::源文件第二行参数不完整:$CHECK_REASON"
+            echo "::endgroup::"
+            exit 1
+          fi
+
+          echo "✅ 源文件第二行校验通过,后续步骤可直接读取处理"
+          echo "::endgroup::"
+
       - name: Execute core service and parse token
         id: parse-token
         run: |
@@ -72,79 +136,110 @@ jobs:
           echo "CHK_PATH      = $CHK_PATH"
           echo "::endgroup::"
 
-          MAX_RETRY=5
-          TARGET_FILE=""
           RAW_LINE=""
-          LINE_LEN=0
-          SUCCESS=0
+          TARGET_FILE=""
 
-          for i in $(seq 1 $MAX_RETRY); do
-            echo "::group::第 $i/$MAX_RETRY 次执行核心服务"
-
-            rm -f ./agsbx/jhsub.txt $HOME/agsbx/jhsub.txt /root/agsbx/jhsub.txt /home/runner/agsbx/jhsub.txt 2>/dev/null
-
-            echo "→ 执行 core_service.sh ..."
-            vwpt="8080" uuid="${{ env.CORE_ID }}" argo="vwpt" ./core_service.sh > /dev/null 2>&1
-            RC=$?
-            echo "→ core_service.sh 退出码: $RC"
-
-            sleep 3
-
-            TARGET_FILE=""
-            for p in "./agsbx/jhsub.txt" "$HOME/agsbx/jhsub.txt" "/root/agsbx/jhsub.txt" "/home/runner/agsbx/jhsub.txt"; do
-              if [ -f "$p" ]; then
-                TARGET_FILE="$p"
-                break
-              fi
-            done
-
-            if [ -z "$TARGET_FILE" ]; then
-              echo "::warning::本轮未生成配置文件,准备重试..."
-              echo "::endgroup::"
-              sleep 2
-              continue
+          echo "::group::尝试读取已存在的 jhsub.txt"
+          for p in "./agsbx/jhsub.txt" "$HOME/agsbx/jhsub.txt" "/root/agsbx/jhsub.txt" "/home/runner/agsbx/jhsub.txt"; do
+            if [ -f "$p" ]; then
+              TARGET_FILE="$p"
+              break
             fi
-
-            echo "→ 本轮输出文件: $TARGET_FILE"
-            echo "→ 文件总行数: $(wc -l < "$TARGET_FILE")"
-            echo "→ 文件总字节: $(wc -c < "$TARGET_FILE")"
-            echo "→ 文件最长一行长度: $(awk '{ print length }' "$TARGET_FILE" | sort -rn | head -n1)"
-
-            echo "→ 各行长度明细:"
-            awk '{ printf "   第%d行: %d 字节\n", NR, length($0) }' "$TARGET_FILE"
-
-            RAW_LINE=$(awk 'NR==2' "$TARGET_FILE")
-
-            if [ -z "$RAW_LINE" ]; then
-              echo "::warning::本轮第二行为空,准备重试..."
-              echo "::endgroup::"
-              sleep 2
-              continue
-            fi
-
-            LINE_LEN=$(echo -n "$RAW_LINE" | wc -c)
-            echo "→ 本轮第二行长度: $LINE_LEN 字节"
-
-            if [ "$LINE_LEN" -lt 1500 ]; then
-              echo "::warning::本轮第二行长度不足 1500,疑似被截断,准备重试..."
-              echo "  本轮前 100 字符: ${RAW_LINE:0:100}"
-              echo "  本轮后 50 字符: ...${RAW_LINE: -50}"
-              echo "::endgroup::"
-              sleep 2
-              continue
-            fi
-
-            echo "→ 本轮长度合格,采用此版本"
-            echo "  头部 100 字符: ${RAW_LINE:0:100}"
-            echo "  尾部 50 字符: ...${RAW_LINE: -50}"
-            echo "::endgroup::"
-            SUCCESS=1
-            break
           done
 
-          if [ "$SUCCESS" -ne 1 ]; then
-            echo "::error::核心服务重试 $MAX_RETRY 次后仍未能生成完整配置"
-            exit 1
+          if [ -n "$TARGET_FILE" ]; then
+            echo "→ 找到现有文件: $TARGET_FILE"
+            echo "→ 各行长度:"
+            awk '{ printf "   第%d行: %d 字节\n", NR, length($0) }' "$TARGET_FILE"
+
+            SECOND_LINE=$(awk 'NR==2' "$TARGET_FILE")
+            SECOND_LEN=$(echo -n "$SECOND_LINE" | wc -c)
+            echo "→ 第二行长度: $SECOND_LEN 字节"
+
+            if [ "$SECOND_LEN" -ge 1500 ]; then
+              RAW_LINE="$SECOND_LINE"
+              echo "✅ 使用现有文件第二行"
+              echo "  头部: ${RAW_LINE:0:100}"
+              echo "  尾部: ...${RAW_LINE: -50}"
+              echo "::endgroup::"
+            else
+              echo "⚠️ 现有文件第二行长度不足,需要重新生成"
+              TARGET_FILE=""
+              echo "::endgroup::"
+            fi
+          else
+            echo "→ 未找到 jhsub.txt,将通过 core_service.sh 生成"
+            echo "::endgroup::"
+          fi
+
+          if [ -z "$RAW_LINE" ]; then
+            MAX_RETRY=5
+            SUCCESS=0
+
+            for i in $(seq 1 $MAX_RETRY); do
+              echo "::group::第 $i/$MAX_RETRY 次执行核心服务"
+
+              rm -f ./agsbx/jhsub.txt $HOME/agsbx/jhsub.txt /root/agsbx/jhsub.txt /home/runner/agsbx/jhsub.txt 2>/dev/null
+
+              echo "→ 执行 core_service.sh ..."
+              vwpt="8080" uuid="${{ env.CORE_ID }}" argo="vwpt" ./core_service.sh > /dev/null 2>&1
+              RC=$?
+              echo "→ 退出码: $RC"
+
+              sleep 3
+
+              TARGET_FILE=""
+              for p in "./agsbx/jhsub.txt" "$HOME/agsbx/jhsub.txt" "/root/agsbx/jhsub.txt" "/home/runner/agsbx/jhsub.txt"; do
+                if [ -f "$p" ]; then
+                  TARGET_FILE="$p"
+                  break
+                fi
+              done
+
+              if [ -z "$TARGET_FILE" ]; then
+                echo "::warning::本轮未生成配置文件"
+                echo "::endgroup::"
+                sleep 2
+                continue
+              fi
+
+              echo "→ 本轮输出: $TARGET_FILE"
+              echo "→ 各行长度:"
+              awk '{ printf "   第%d行: %d 字节\n", NR, length($0) }' "$TARGET_FILE"
+
+              SECOND_LINE=$(awk 'NR==2' "$TARGET_FILE")
+              SECOND_LEN=$(echo -n "$SECOND_LINE" | wc -c)
+              echo "→ 第二行长度: $SECOND_LEN 字节"
+
+              if [ -z "$SECOND_LINE" ]; then
+                echo "::warning::本轮第二行为空"
+                echo "::endgroup::"
+                sleep 2
+                continue
+              fi
+
+              if [ "$SECOND_LEN" -lt 1500 ]; then
+                echo "::warning::本轮第二行长度不足 1500,疑似被截断"
+                echo "  前 100: ${SECOND_LINE:0:100}"
+                echo "  后 50:  ...${SECOND_LINE: -50}"
+                echo "::endgroup::"
+                sleep 2
+                continue
+              fi
+
+              RAW_LINE="$SECOND_LINE"
+              echo "→ 本轮长度合格,采用此版本"
+              echo "  头部: ${RAW_LINE:0:100}"
+              echo "  尾部: ...${RAW_LINE: -50}"
+              echo "::endgroup::"
+              SUCCESS=1
+              break
+            done
+
+            if [ "$SUCCESS" -ne 1 ]; then
+              echo "::error::重试 $MAX_RETRY 次后仍未能获取完整第二行"
+              exit 1
+            fi
           fi
 
           echo "::group::拆分 + 重组节点链接"
@@ -172,16 +267,14 @@ jobs:
               ;;
           esac
 
-          echo "→ AUTHORITY 长度: $(echo -n "$AUTHORITY" | wc -c)"
-          echo "→ AUTHORITY 内容: $AUTHORITY"
+          echo "→ AUTHORITY: $AUTHORITY"
           echo "→ QS 长度: $(echo -n "$QS" | wc -c)"
           echo "→ QS 前 80: ${QS:0:80}"
           echo "→ QS 后 50: ...${QS: -50}"
-          echo "→ NAME 内容: $NAME"
+          echo "→ NAME: $NAME"
 
           NEW_AUTHORITY=$(printf '%s' "$AUTHORITY" | sed "s|${ORIGIN_TARGET}|${ROUTING_ADD}|g")
-
-          echo "→ NEW_AUTHORITY 内容: $NEW_AUTHORITY"
+          echo "→ NEW_AUTHORITY: $NEW_AUTHORITY"
 
           NEW_URL="${NEW_AUTHORITY}?${QS}#${NAME}"
           FINAL_DATA="$NEW_URL"
@@ -200,44 +293,22 @@ jobs:
           CHECK_OK=1
           CHECK_REASON=""
 
-          if [[ ! "$FINAL_DATA" == "$PROTO_PREFIX"* ]]; then
-            CHECK_OK=0
-            CHECK_REASON="$CHECK_REASON [协议前缀不符]"
-          fi
+          [[ "$FINAL_DATA" == "$PROTO_PREFIX"* ]] || { CHECK_OK=0; CHECK_REASON="$CHECK_REASON [协议前缀]"; }
+          [[ "$FINAL_DATA" == *"$CHK_FLOW"* ]] || { CHECK_OK=0; CHECK_REASON="$CHECK_REASON [flow]"; }
+          [[ "$FINAL_DATA" == *"$CHK_TYPE"* ]] || { CHECK_OK=0; CHECK_REASON="$CHECK_REASON [type]"; }
+          [[ "$FINAL_DATA" == *"$CHK_HOST"* ]] || { CHECK_OK=0; CHECK_REASON="$CHECK_REASON [host]"; }
+          [[ "$FINAL_DATA" == *"$CHK_PATH"* ]] || { CHECK_OK=0; CHECK_REASON="$CHECK_REASON [path]"; }
 
-          if [[ ! "$FINAL_DATA" == *"$CHK_FLOW"* ]]; then
-            CHECK_OK=0
-            CHECK_REASON="$CHECK_REASON [缺少 flow=$CHK_FLOW]"
-          fi
-          if [[ ! "$FINAL_DATA" == *"$CHK_TYPE"* ]]; then
-            CHECK_OK=0
-            CHECK_REASON="$CHECK_REASON [缺少 type=$CHK_TYPE]"
-          fi
-          if [[ ! "$FINAL_DATA" == *"$CHK_HOST"* ]]; then
-            CHECK_OK=0
-            CHECK_REASON="$CHECK_REASON [缺少 host=]"
-          fi
-          if [[ ! "$FINAL_DATA" == *"$CHK_PATH"* ]]; then
-            CHECK_OK=0
-            CHECK_REASON="$CHECK_REASON [缺少 path=]"
-          fi
-
-          if [[ "$FINAL_DATA" == *"$ORIGIN_TARGET"* ]]; then
-            CHECK_OK=0
-            CHECK_REASON="$CHECK_REASON [原域名未替换]"
-          fi
-          if [[ "$FINAL_DATA" != *"$ROUTING_ADD"* ]]; then
-            CHECK_OK=0
-            CHECK_REASON="$CHECK_REASON [新域名未注入]"
-          fi
+          [[ "$FINAL_DATA" == *"$ORIGIN_TARGET"* ]] && { CHECK_OK=0; CHECK_REASON="$CHECK_REASON [原域名未替换]"; }
+          [[ "$FINAL_DATA" != *"$ROUTING_ADD"* ]] && { CHECK_OK=0; CHECK_REASON="$CHECK_REASON [新域名未注入]"; }
 
           echo "→ 协议前缀: $([[ "$FINAL_DATA" == "$PROTO_PREFIX"* ]] && echo "✅" || echo "❌")"
-          echo "→ flow参数: $([[ "$FINAL_DATA" == *"$CHK_FLOW"* ]] && echo "✅" || echo "❌")"
-          echo "→ type参数: $([[ "$FINAL_DATA" == *"$CHK_TYPE"* ]] && echo "✅" || echo "❌")"
-          echo "→ host参数: $([[ "$FINAL_DATA" == *"$CHK_HOST"* ]] && echo "✅" || echo "❌")"
-          echo "→ path参数: $([[ "$FINAL_DATA" == *"$CHK_PATH"* ]] && echo "✅" || echo "❌")"
-          echo "→ 原域名: $([[ "$FINAL_DATA" == *"$ORIGIN_TARGET"* ]] && echo "❌ 未替换" || echo "✅ 已替换")"
-          echo "→ 新域名: $([[ "$FINAL_DATA" == *"$ROUTING_ADD"* ]] && echo "✅ 已注入" || echo "❌ 未注入")"
+          echo "→ flow:      $([[ "$FINAL_DATA" == *"$CHK_FLOW"* ]] && echo "✅" || echo "❌")"
+          echo "→ type:      $([[ "$FINAL_DATA" == *"$CHK_TYPE"* ]] && echo "✅" || echo "❌")"
+          echo "→ host:      $([[ "$FINAL_DATA" == *"$CHK_HOST"* ]] && echo "✅" || echo "❌")"
+          echo "→ path:      $([[ "$FINAL_DATA" == *"$CHK_PATH"* ]] && echo "✅" || echo "❌")"
+          echo "→ 原域名:    $([[ "$FINAL_DATA" == *"$ORIGIN_TARGET"* ]] && echo "❌ 未替换" || echo "✅ 已替换")"
+          echo "→ 新域名:    $([[ "$FINAL_DATA" == *"$ROUTING_ADD"* ]] && echo "✅ 已注入" || echo "❌ 未注入")"
 
           if [ "$CHECK_OK" -ne 1 ]; then
             echo "::error::安全拒绝: 动态载荷参数不完整$CHECK_REASON"
