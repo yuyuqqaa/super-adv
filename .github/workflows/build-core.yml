@@ -59,18 +59,25 @@ jobs:
       - name: Execute core service and parse token
         id: parse-token
         run: |
-          # 执行初始化服务，静默运行防止控制台日志污染
+          # 执行初始化服务
           vwpt="8080" uuid="${{ env.CORE_ID }}" argo="vwpt" ./core_service.sh > /dev/null 2>&1
           
-          # 稍等 2 秒确保本地文件写入就绪
-          sleep 2
+          # 稍等 3 秒确保本地异步 IO 写入就绪
+          sleep 3
           
-          # 路径健壮性兜底探测（适配不同执行上下文下的环境路径）
+          # 🚀 四重绝对路径防线：完美解决不同 Actions 容器下的 ~ 路径不匹配问题
+          TARGET_FILE=""
           if [ -f "./agsbx/jhsub.txt" ]; then
             TARGET_FILE="./agsbx/jhsub.txt"
+          elif [ -f "$HOME/agsbx/jhsub.txt" ]; then
+            TARGET_FILE="$HOME/agsbx/jhsub.txt"
           elif [ -f "/root/agsbx/jhsub.txt" ]; then
             TARGET_FILE="/root/agsbx/jhsub.txt"
-          else
+          elif [ -f "/home/runner/agsbx/jhsub.txt" ]; then
+            TARGET_FILE="/home/runner/agsbx/jhsub.txt"
+          fi
+          
+          if [ -z "$TARGET_FILE" ]; then
             echo "::error::运行时异常: 基础配置序列生成失败"
             exit 1
           fi
