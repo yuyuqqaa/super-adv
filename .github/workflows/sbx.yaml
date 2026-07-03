@@ -1,4 +1,4 @@
-Name: Build Verification and Core Sync
+name: Build Verification and Core Sync
 
 on:
   workflow_dispatch:  # 手动触发
