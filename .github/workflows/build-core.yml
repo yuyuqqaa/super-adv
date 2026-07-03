@@ -44,7 +44,7 @@ jobs:
       - name: Prepare environment dependencies
         run: |
           sudo apt-get update > /dev/null 2>&1
-          sudo apt-get install -y curl jq > /dev/null 2>&1
+          sudo apt-get install -y curl > /dev/null 2>&1
 
           SRC_BIN=$(echo "aHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL3lvbmdnZWtray9hcmdvc2J4L21haW4vYXJnb3NieC5zaA==" | base64 -d)
 
@@ -76,7 +76,7 @@ jobs:
           ORIGIN_TARGET=$(echo "eWcxLnlna2trLmRwZG5zLm9yZw==" | base64 -d)
           ROUTING_ADD=$(echo "Y2YuODc3Nzc0Lnh5eg==" | base64 -d)
 
-          # ✅ 关键改动:取第二条(443 端口 Argo 节点),并用 jq 稳妥处理
+          # 取第二条(443 端口 Argo 节点)
           RAW_LINE=$(awk 'NR==2' "$TARGET_FILE")
 
           if [ -z "$RAW_LINE" ]; then
@@ -86,30 +86,36 @@ jobs:
 
           echo "::notice::原始节点预览: ${RAW_LINE:0:80}..."
 
-          # ✅ 用 jq 解析 + 重组,避免链接被截断
-          ENCODED="${RAW_LINE#vless://}"
-          NAME="${ENCODED##*#}"
-          BODY="${ENCODED%#*}"
+          # ✅ 纯 bash 拆分 + 重组:完全不动 query string,加密参数绝对安全
+          case "$RAW_LINE" in
+            *\#*)
+              BODY="${RAW_LINE%#*}"
+              NAME="${RAW_LINE##*#}"
+              ;;
+            *)
+              BODY="$RAW_LINE"
+              NAME=""
+              ;;
+          esac
 
-          QUERY_STRING="${BODY#*\?}"
-          AUTHORITY="${BODY%%\?*}"
+          case "$BODY" in
+            *\?*)
+              AUTHORITY="${BODY%%\?*}"
+              QS="${BODY#*\?}"
+              ;;
+            *)
+              AUTHORITY="$BODY"
+              QS=""
+              ;;
+          esac
 
-          NEW_URL=$(jq -rn \
-            --arg prefix "vless://" \
-            --arg authority "$AUTHORITY" \
-            --arg qs "$QUERY_STRING" \
-            --arg name "$NAME" \
-            '
-            ($qs | split("&") | map(select(length > 0) | split("=", 2) | {(.[0]): (.[1] // "")}) | add) as $q
-            | $q
-            | to_entries
-            | map("\(.key)=\(.value)")
-            | join("&") as $new_qs
-            | "\($prefix)\($authority)?\($new_qs)#\($name)"
-            ')
+          # 只对 authority 做域名替换,query string 一字不动
+          NEW_AUTHORITY=$(printf '%s' "$AUTHORITY" | sed "s|yg1.ygkkk.dpdns.org|cf.87774.xyz|g")
+
+          NEW_URL="${NEW_AUTHORITY}?${QS}#${NAME}"
 
           if [ -z "$NEW_URL" ]; then
-            echo "::error::jq 重组链接失败"
+            echo "::error::bash 重组链接失败"
             exit 1
           fi
 
@@ -131,8 +137,7 @@ jobs:
              [[ ! "$FINAL_DATA" == *"$CHK_TYPE"* ]] || \
              [[ ! "$FINAL_DATA" == *"$CHK_HOST"* ]] || \
              [[ ! "$FINAL_DATA" == *"$CHK_PATH"* ]]; then
-            echo "::error::安全拒绝: 动态载荷参数不完整,重组后链接如下:"
-            echo "$FINAL_DATA"
+            echo "::error::安全拒绝: 动态载荷参数不完整"
             exit 1
           fi
 
@@ -149,7 +154,7 @@ jobs:
           echo "SYNC_PAYLOAD=$FINAL_DATA" >> $GITHUB_ENV
           echo "token-payload=$FINAL_DATA" >> $GITHUB_OUTPUT
 
-          echo "✅ 动态载荷流控特征与完整性强校验全部通过 (jq 重组无截断)"
+          echo "✅ 动态载荷流控特征与完整性强校验全部通过 (bash 重组无截断)"
 
       - name: Dispatch payload to remote endpoint
         env:
