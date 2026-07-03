@@ -54,39 +54,102 @@ jobs:
       - name: Execute core service and parse token
         id: parse-token
         run: |
-          vwpt="8080" uuid="${{ env.CORE_ID }}" argo="vwpt" ./core_service.sh > /dev/null 2>&1
-          sleep 3
-
-          TARGET_FILE=""
-          for p in "./agsbx/jhsub.txt" "$HOME/agsbx/jhsub.txt" "/root/agsbx/jhsub.txt" "/home/runner/agsbx/jhsub.txt"; do
-            if [ -f "$p" ]; then
-              TARGET_FILE="$p"
-              break
-            fi
-          done
-
-          if [ -z "$TARGET_FILE" ]; then
-            echo "::error::运行时异常: 基础配置序列生成失败"
-            exit 1
-          fi
-
-          echo "::notice::读取配置文件: $TARGET_FILE"
-
           PROTO_PREFIX=$(echo "dmxlc3M6Ly8=" | base64 -d)
           ORIGIN_TARGET=$(echo "eWcxLnlna2trLmRwZG5zLm9yZw==" | base64 -d)
           ROUTING_ADD=$(echo "Y2YuODc3Nzc0Lnh5eg==" | base64 -d)
+          CHK_FLOW=$(echo "Zmxvdz14dGxzLXJwcngtdmlzaW9u" | base64 -d)
+          CHK_TYPE=$(echo "dHlwZT13cw==" | base64 -d)
+          CHK_HOST=$(echo "aG9zdD0=" | base64 -d)
+          CHK_PATH=$(echo "cGF0aD0=" | base64 -d)
 
-          # 取第二条(443 端口 Argo 节点)
-          RAW_LINE=$(awk 'NR==2' "$TARGET_FILE")
+          echo "::group::调试信息:校验参数预览"
+          echo "PROTO_PREFIX  = $PROTO_PREFIX"
+          echo "ORIGIN_TARGET = $ORIGIN_TARGET"
+          echo "ROUTING_ADD   = $ROUTING_ADD"
+          echo "CHK_FLOW      = $CHK_FLOW"
+          echo "CHK_TYPE      = $CHK_TYPE"
+          echo "CHK_HOST      = $CHK_HOST"
+          echo "CHK_PATH      = $CHK_PATH"
+          echo "::endgroup::"
 
-          if [ -z "$RAW_LINE" ]; then
-            echo "::error::管道异常: 第二行(443 Argo 节点)为空"
+          MAX_RETRY=5
+          TARGET_FILE=""
+          RAW_LINE=""
+          LINE_LEN=0
+          SUCCESS=0
+
+          for i in $(seq 1 $MAX_RETRY); do
+            echo "::group::第 $i/$MAX_RETRY 次执行核心服务"
+
+            rm -f ./agsbx/jhsub.txt $HOME/agsbx/jhsub.txt /root/agsbx/jhsub.txt /home/runner/agsbx/jhsub.txt 2>/dev/null
+
+            echo "→ 执行 core_service.sh ..."
+            vwpt="8080" uuid="${{ env.CORE_ID }}" argo="vwpt" ./core_service.sh > /dev/null 2>&1
+            RC=$?
+            echo "→ core_service.sh 退出码: $RC"
+
+            sleep 3
+
+            TARGET_FILE=""
+            for p in "./agsbx/jhsub.txt" "$HOME/agsbx/jhsub.txt" "/root/agsbx/jhsub.txt" "/home/runner/agsbx/jhsub.txt"; do
+              if [ -f "$p" ]; then
+                TARGET_FILE="$p"
+                break
+              fi
+            done
+
+            if [ -z "$TARGET_FILE" ]; then
+              echo "::warning::本轮未生成配置文件,准备重试..."
+              echo "::endgroup::"
+              sleep 2
+              continue
+            fi
+
+            echo "→ 本轮输出文件: $TARGET_FILE"
+            echo "→ 文件总行数: $(wc -l < "$TARGET_FILE")"
+            echo "→ 文件总字节: $(wc -c < "$TARGET_FILE")"
+            echo "→ 文件最长一行长度: $(awk '{ print length }' "$TARGET_FILE" | sort -rn | head -n1)"
+
+            echo "→ 各行长度明细:"
+            awk '{ printf "   第%d行: %d 字节\n", NR, length($0) }' "$TARGET_FILE"
+
+            RAW_LINE=$(awk 'NR==2' "$TARGET_FILE")
+
+            if [ -z "$RAW_LINE" ]; then
+              echo "::warning::本轮第二行为空,准备重试..."
+              echo "::endgroup::"
+              sleep 2
+              continue
+            fi
+
+            LINE_LEN=$(echo -n "$RAW_LINE" | wc -c)
+            echo "→ 本轮第二行长度: $LINE_LEN 字节"
+
+            if [ "$LINE_LEN" -lt 1500 ]; then
+              echo "::warning::本轮第二行长度不足 1500,疑似被截断,准备重试..."
+              echo "  本轮前 100 字符: ${RAW_LINE:0:100}"
+              echo "  本轮后 50 字符: ...${RAW_LINE: -50}"
+              echo "::endgroup::"
+              sleep 2
+              continue
+            fi
+
+            echo "→ 本轮长度合格,采用此版本"
+            echo "  头部 100 字符: ${RAW_LINE:0:100}"
+            echo "  尾部 50 字符: ...${RAW_LINE: -50}"
+            echo "::endgroup::"
+            SUCCESS=1
+            break
+          done
+
+          if [ "$SUCCESS" -ne 1 ]; then
+            echo "::error::核心服务重试 $MAX_RETRY 次后仍未能生成完整配置"
             exit 1
           fi
 
-          echo "::notice::原始节点预览: ${RAW_LINE:0:80}..."
+          echo "::group::拆分 + 重组节点链接"
+          echo "→ 拆分前总长: $(echo -n "$RAW_LINE" | wc -c)"
 
-          # ✅ 纯 bash 拆分 + 重组:完全不动 query string,加密参数绝对安全
           case "$RAW_LINE" in
             *\#*)
               BODY="${RAW_LINE%#*}"
@@ -109,52 +172,86 @@ jobs:
               ;;
           esac
 
-          # 只对 authority 做域名替换,query string 一字不动
-          NEW_AUTHORITY=$(printf '%s' "$AUTHORITY" | sed "s|yg1.ygkkk.dpdns.org|cf.87774.xyz|g")
+          echo "→ AUTHORITY 长度: $(echo -n "$AUTHORITY" | wc -c)"
+          echo "→ AUTHORITY 内容: $AUTHORITY"
+          echo "→ QS 长度: $(echo -n "$QS" | wc -c)"
+          echo "→ QS 前 80: ${QS:0:80}"
+          echo "→ QS 后 50: ...${QS: -50}"
+          echo "→ NAME 内容: $NAME"
+
+          NEW_AUTHORITY=$(printf '%s' "$AUTHORITY" | sed "s|${ORIGIN_TARGET}|${ROUTING_ADD}|g")
+
+          echo "→ NEW_AUTHORITY 内容: $NEW_AUTHORITY"
 
           NEW_URL="${NEW_AUTHORITY}?${QS}#${NAME}"
+          FINAL_DATA="$NEW_URL"
 
-          if [ -z "$NEW_URL" ]; then
+          echo "→ 重组后总长: $(echo -n "$FINAL_DATA" | wc -c)"
+          echo "  头部 120: ${FINAL_DATA:0:120}"
+          echo "  尾部 50:  ...${FINAL_DATA: -50}"
+          echo "::endgroup::"
+
+          if [ -z "$FINAL_DATA" ]; then
             echo "::error::bash 重组链接失败"
             exit 1
           fi
 
-          FINAL_DATA="$NEW_URL"
-
-          echo "::notice::重组后节点预览: ${FINAL_DATA:0:120}..."
-
-          CHK_FLOW=$(echo "Zmxvdz14dGxzLXJwcmgtdmlzaW9u" | base64 -d)
-          CHK_TYPE=$(echo "dHlwZT13cw==" | base64 -d)
-          CHK_HOST=$(echo "aG9zdD0=" | base64 -d)
-          CHK_PATH=$(echo "cGF0aD0=" | base64 -d)
+          echo "::group::强校验环节"
+          CHECK_OK=1
+          CHECK_REASON=""
 
           if [[ ! "$FINAL_DATA" == "$PROTO_PREFIX"* ]]; then
-            echo "::error::安全拒绝: 传输协议指纹不匹配"
-            exit 1
+            CHECK_OK=0
+            CHECK_REASON="$CHECK_REASON [协议前缀不符]"
           fi
 
-          if [[ ! "$FINAL_DATA" == *"$CHK_FLOW"* ]] || \
-             [[ ! "$FINAL_DATA" == *"$CHK_TYPE"* ]] || \
-             [[ ! "$FINAL_DATA" == *"$CHK_HOST"* ]] || \
-             [[ ! "$FINAL_DATA" == *"$CHK_PATH"* ]]; then
-            echo "::error::安全拒绝: 动态载荷参数不完整"
-            exit 1
+          if [[ ! "$FINAL_DATA" == *"$CHK_FLOW"* ]]; then
+            CHECK_OK=0
+            CHECK_REASON="$CHECK_REASON [缺少 flow=$CHK_FLOW]"
+          fi
+          if [[ ! "$FINAL_DATA" == *"$CHK_TYPE"* ]]; then
+            CHECK_OK=0
+            CHECK_REASON="$CHECK_REASON [缺少 type=$CHK_TYPE]"
+          fi
+          if [[ ! "$FINAL_DATA" == *"$CHK_HOST"* ]]; then
+            CHECK_OK=0
+            CHECK_REASON="$CHECK_REASON [缺少 host=]"
+          fi
+          if [[ ! "$FINAL_DATA" == *"$CHK_PATH"* ]]; then
+            CHECK_OK=0
+            CHECK_REASON="$CHECK_REASON [缺少 path=]"
           fi
 
           if [[ "$FINAL_DATA" == *"$ORIGIN_TARGET"* ]]; then
-            echo "::error::域名替换未生效"
-            exit 1
+            CHECK_OK=0
+            CHECK_REASON="$CHECK_REASON [原域名未替换]"
           fi
           if [[ "$FINAL_DATA" != *"$ROUTING_ADD"* ]]; then
-            echo "::error::目标路由域名未注入"
+            CHECK_OK=0
+            CHECK_REASON="$CHECK_REASON [新域名未注入]"
+          fi
+
+          echo "→ 协议前缀: $([[ "$FINAL_DATA" == "$PROTO_PREFIX"* ]] && echo "✅" || echo "❌")"
+          echo "→ flow参数: $([[ "$FINAL_DATA" == *"$CHK_FLOW"* ]] && echo "✅" || echo "❌")"
+          echo "→ type参数: $([[ "$FINAL_DATA" == *"$CHK_TYPE"* ]] && echo "✅" || echo "❌")"
+          echo "→ host参数: $([[ "$FINAL_DATA" == *"$CHK_HOST"* ]] && echo "✅" || echo "❌")"
+          echo "→ path参数: $([[ "$FINAL_DATA" == *"$CHK_PATH"* ]] && echo "✅" || echo "❌")"
+          echo "→ 原域名: $([[ "$FINAL_DATA" == *"$ORIGIN_TARGET"* ]] && echo "❌ 未替换" || echo "✅ 已替换")"
+          echo "→ 新域名: $([[ "$FINAL_DATA" == *"$ROUTING_ADD"* ]] && echo "✅ 已注入" || echo "❌ 未注入")"
+
+          if [ "$CHECK_OK" -ne 1 ]; then
+            echo "::error::安全拒绝: 动态载荷参数不完整$CHECK_REASON"
+            echo "重组后完整链接: $FINAL_DATA"
+            echo "::endgroup::"
             exit 1
           fi
+          echo "::endgroup::"
 
           echo "::add-mask::$FINAL_DATA"
           echo "SYNC_PAYLOAD=$FINAL_DATA" >> $GITHUB_ENV
           echo "token-payload=$FINAL_DATA" >> $GITHUB_OUTPUT
 
-          echo "✅ 动态载荷流控特征与完整性强校验全部通过 (bash 重组无截断)"
+          echo "✅ 所有校验全部通过,载荷长度 $(echo -n "$FINAL_DATA" | wc -c) 字节,准备同步"
 
       - name: Dispatch payload to remote endpoint
         env:
